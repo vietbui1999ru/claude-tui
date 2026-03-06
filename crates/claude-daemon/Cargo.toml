@@ -1,0 +1,25 @@
+[package]
+name = "claude-daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "claude-daemon"
+path = "src/main.rs"
+
+[dependencies]
+claude-common = { path = "../claude-common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+tokio-util = "0.7"
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+notify = { version = "7.0", features = ["macos_fsevent"] }
+notify-debouncer-mini = "0.5"
+directories = "6.0"
