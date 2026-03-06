@@ -11,7 +11,7 @@ pub fn mock_status() -> StatusResponse {
         current_model: Some(ModelType::Sonnet),
         cost_today_usd: 3.47,
         budget_pct: Some(0.67),
-        collector_status: CollectorStatus::Api,
+        collector_status: CollectorStatus::Log,
     }
 }
 

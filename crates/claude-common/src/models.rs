@@ -117,7 +117,6 @@ impl fmt::Display for SessionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DataSource {
-    Api,
     Log,
 }
 
@@ -311,9 +310,9 @@ mod tests {
 
     #[test]
     fn test_data_source_serde_roundtrip() {
-        let source = DataSource::Api;
+        let source = DataSource::Log;
         let json = serde_json::to_string(&source).unwrap();
-        assert_eq!(json, r#""api""#);
+        assert_eq!(json, r#""log""#);
         let parsed: DataSource = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, source);
     }

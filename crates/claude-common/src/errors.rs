@@ -19,22 +19,8 @@ pub enum AppError {
 }
 
 /// Errors from the data collector subsystem.
-/// Uses String wrappers for external types (reqwest, notify) so claude-common
-/// remains a leaf crate with no heavy dependencies.
 #[derive(Debug, Error)]
 pub enum CollectorError {
-    #[error("api request failed: {0}")]
-    ApiRequest(String),
-
-    #[error("api returned error {status}: {body}")]
-    ApiResponse { status: u16, body: String },
-
-    #[error("api rate limited, retry after {retry_after_secs}s")]
-    RateLimited { retry_after_secs: u64 },
-
-    #[error("api authentication failed: {0}")]
-    AuthError(String),
-
     #[error("failed to parse log line: {0}")]
     LogParse(String),
 
@@ -152,10 +138,10 @@ mod tests {
 
     #[test]
     fn test_app_error_from_collector() {
-        let collector_err = CollectorError::AuthError("invalid key".to_string());
+        let collector_err = CollectorError::LogParse("bad line".to_string());
         let app_err: AppError = collector_err.into();
         assert!(matches!(app_err, AppError::Collector(_)));
-        assert!(app_err.to_string().contains("invalid key"));
+        assert!(app_err.to_string().contains("bad line"));
     }
 
     #[test]
@@ -174,10 +160,8 @@ mod tests {
 
     #[test]
     fn test_collector_error_display() {
-        let err = CollectorError::RateLimited {
-            retry_after_secs: 30,
-        };
-        assert_eq!(err.to_string(), "api rate limited, retry after 30s");
+        let err = CollectorError::LogWatch("inotify failed".to_string());
+        assert_eq!(err.to_string(), "log file watch error: inotify failed");
     }
 
     #[test]

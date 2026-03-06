@@ -48,24 +48,7 @@ async fn main() {
     // Cancellation token for graceful shutdown
     let cancel = CancellationToken::new();
 
-    // Build collector config.
-    // Only Admin API keys (sk-ant-admin...) are useful for the Usage API.
-    // Regular API keys will get a 401 — skip the API entirely for those.
-    let admin_key = std::env::var("ANTHROPIC_ADMIN_KEY")
-        .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
-        .ok()
-        .filter(|key| key.starts_with("sk-ant-admin"));
-
-    if admin_key.is_some() {
-        info!("using Admin API key for usage reporting");
-    } else {
-        info!("no Admin API key found; collecting usage from local Claude Code logs");
-    }
-
-    let collector_config = CollectorConfig {
-        api_key: admin_key,
-        ..CollectorConfig::default()
-    };
+    let collector_config = CollectorConfig::default();
 
     // Spawn collector
     let collector = Collector::new(

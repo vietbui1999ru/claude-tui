@@ -67,7 +67,6 @@ pub const NOT_FOUND: i32 = -3;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CollectorStatus {
-    Api,
     Log,
     Offline,
 }
@@ -314,7 +313,7 @@ mod tests {
             current_model: Some(ModelType::Sonnet),
             cost_today_usd: 3.47,
             budget_pct: Some(0.67),
-            collector_status: CollectorStatus::Api,
+            collector_status: CollectorStatus::Log,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StatusResponse = serde_json::from_str(&json).unwrap();
@@ -402,11 +401,11 @@ mod tests {
 
     #[test]
     fn test_collector_status_roundtrip() {
-        let status = CollectorStatus::Api;
+        let status = CollectorStatus::Log;
         let json = serde_json::to_string(&status).unwrap();
-        assert_eq!(json, r#""api""#);
+        assert_eq!(json, r#""log""#);
         let parsed: CollectorStatus = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, CollectorStatus::Api));
+        assert!(matches!(parsed, CollectorStatus::Log));
     }
 
     #[test]

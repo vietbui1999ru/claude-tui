@@ -154,10 +154,7 @@ impl Storage {
 
     pub fn insert_usage(&self, record: &UsageRecord) -> Result<(), StorageError> {
         let model_str = record.model.to_string().to_lowercase();
-        let source_str = match record.source {
-            DataSource::Api => "api",
-            DataSource::Log => "log",
-        };
+        let source_str = "log";
 
         self.conn
             .execute(
@@ -184,10 +181,7 @@ impl Storage {
         let tx = self.conn.transaction().map_err(|e| StorageError::Sqlite(e.to_string()))?;
         for record in records {
             let model_str = record.model.to_string().to_lowercase();
-            let source_str = match record.source {
-                DataSource::Api => "api",
-                DataSource::Log => "log",
-            };
+            let source_str = "log";
             tx.execute(
                 "INSERT OR IGNORE INTO usage_records (uuid, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, session_id, project, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
@@ -718,7 +712,7 @@ fn row_to_usage_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord>
     let uuid_str: String = row.get(1)?;
     let ts_str: String = row.get(2)?;
     let model_str: String = row.get(3)?;
-    let source_str: String = row.get(11)?;
+    let _source_str: String = row.get(11)?;
 
     let uuid = uuid_str.parse().map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(
@@ -750,11 +744,7 @@ fn row_to_usage_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord>
         cost_usd: row.get(8)?,
         session_id: row.get(9)?,
         project: row.get(10)?,
-        source: if source_str == "log" {
-            DataSource::Log
-        } else {
-            DataSource::Api
-        },
+        source: DataSource::Log,
     })
 }
 
@@ -830,7 +820,7 @@ mod tests {
             cost_usd: cost,
             session_id: Some("test-session".to_string()),
             project: Some("test-project".to_string()),
-            source: DataSource::Api,
+            source: DataSource::Log,
         }
     }
 
