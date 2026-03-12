@@ -1,3 +1,4 @@
+# **WARNING** This project may contain security vulnerabilities, or at least memory and code-quality issues. Built in a weekend to test out personal Claude Vibe-Code Workflow and for local development and playtest only. Use at your own risk.
 # claude-tui
 
 A terminal dashboard for monitoring Claude Code usage and costs — built entirely around local data. No API keys, no network calls, no telemetry. The daemon reads only from Claude Code's local JSONL logs on your machine.
