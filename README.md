@@ -3,6 +3,19 @@
 
 A terminal dashboard for monitoring Claude Code usage and costs — built entirely around local data. No API keys, no network calls, no telemetry. The daemon reads only from Claude Code's local JSONL logs on your machine.
 
+## Demo
+
+1. Fetches data for cost, model, token usage, and active sessions in local machine.
+- <img src="./docs/demo/cost_approximator.png" width="600" />
+
+- <img src="./docs/demo/model_usage.png" width="600" />
+
+- <img src="./docs/demo/tokens_usage.png" width="600" />
+
+- <img src="./docs/demo/live_monitor.png" width="600" />
+2. Can integrate to your existing sketchybar config.
+- <img src="./docs/demo/sketchybar.png" width="600" />
+
 ## Architecture
 
 ```
@@ -30,7 +43,7 @@ A terminal dashboard for monitoring Claude Code usage and costs — built entire
 
 ## Security and Privacy
 
-This tool is designed to run safely on your personal machine:
+This tool is designed to with an attempt to run safely on your personal machine:
 
 - **No network access** — the daemon makes zero outbound connections. All data comes from local log files already on disk. The binary has no HTTP client dependency.
 - **Read-only log access** — the collector only reads `~/.claude/projects/**/*.jsonl` files. It never writes to, modifies, or deletes Claude Code's data.
