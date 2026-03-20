@@ -14,7 +14,7 @@ A terminal dashboard for monitoring Claude Code usage and costs — built entire
 
 - <img src="./docs/demo/live_monitor.png" width="600" />
 2. Can integrate to your existing sketchybar config.
-- <img src="./docs/demo/sketchybar.png" width="600" />
+- <img src="./docs/demo/sketchybar.png" width="1080" style="max-width: 1080px; display: center" />
 
 ## Architecture
 
