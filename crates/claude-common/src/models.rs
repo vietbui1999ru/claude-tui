@@ -114,10 +114,95 @@ impl fmt::Display for SessionStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Where a usage record was collected from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DataSource {
+    /// Claude Code conversation logs (`~/.claude/projects/**/*.jsonl`).
     Log,
+    /// Claude Code quota snapshot (statusline stdin JSON or `~/.claude.json`).
+    ClaudeQuota,
+    /// Codex CLI rollout files (`~/.codex/sessions/**/rollout-*.jsonl`).
+    CodexRollout,
+    /// Pi session files (`~/.pi/agent/sessions/**/*.jsonl`).
+    PiSession,
+    /// OpenCode's SQLite database.
+    OpencodeDb,
+}
+
+/// The upstream model provider that billed a record's tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provider {
+    Anthropic,
+    OpenAiCodex,
+    OpencodeGo,
+    /// Any provider this dashboard does not know about.
+    Other,
+}
+
+impl Provider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Provider::Anthropic => "anthropic",
+            Provider::OpenAiCodex => "openai-codex",
+            Provider::OpencodeGo => "opencode-go",
+            Provider::Other => "other",
+        }
+    }
+}
+
+impl fmt::Display for Provider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The subscription a record's usage counts against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Subscription {
+    Claude,
+    #[serde(rename = "chatgpt")]
+    ChatGpt,
+    OpencodeGo,
+    Other,
+}
+
+impl Subscription {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Subscription::Claude => "claude",
+            Subscription::ChatGpt => "chatgpt",
+            Subscription::OpencodeGo => "opencode-go",
+            Subscription::Other => "other",
+        }
+    }
+}
+
+impl fmt::Display for Subscription {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Group a collected record by the subscription it draws on.
+///
+/// Several tools share one plan: the Codex CLI and Pi's `openai-codex` provider
+/// both draw on the ChatGPT plan, and Pi's `opencode-go` provider and OpenCode
+/// both draw on the opencode-go plan. This is a pure function so the grouping
+/// stays identical wherever it is applied.
+pub fn subscription_for(source: DataSource, provider: Provider) -> Subscription {
+    match source {
+        DataSource::Log | DataSource::ClaudeQuota => Subscription::Claude,
+        DataSource::CodexRollout => Subscription::ChatGpt,
+        DataSource::PiSession => match provider {
+            Provider::OpenAiCodex => Subscription::ChatGpt,
+            Provider::OpencodeGo => Subscription::OpencodeGo,
+            Provider::Anthropic | Provider::Other => Subscription::Other,
+        },
+        DataSource::OpencodeDb => Subscription::OpencodeGo,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,7 +312,10 @@ mod tests {
         // cache_read: 200K * 1.5/1M = 0.3
         // cache_write: 100K * 18.75/1M = 1.875
         let expected = 15.0 + 37.5 + 0.3 + 1.875;
-        assert!((cost - expected).abs() < 1e-10, "got {cost}, expected {expected}");
+        assert!(
+            (cost - expected).abs() < 1e-10,
+            "got {cost}, expected {expected}"
+        );
     }
 
     #[test]
@@ -236,7 +324,10 @@ mod tests {
         // input: 1M * 3/1M = 3.0
         // output: 1M * 15/1M = 15.0
         let expected = 18.0;
-        assert!((cost - expected).abs() < 1e-10, "got {cost}, expected {expected}");
+        assert!(
+            (cost - expected).abs() < 1e-10,
+            "got {cost}, expected {expected}"
+        );
     }
 
     #[test]
@@ -247,7 +338,10 @@ mod tests {
         // cache_read: 100K * 0.08/1M = 0.008
         // cache_write: 50K * 1.0/1M = 0.05
         let expected = 0.4 + 1.0 + 0.008 + 0.05;
-        assert!((cost - expected).abs() < 1e-10, "got {cost}, expected {expected}");
+        assert!(
+            (cost - expected).abs() < 1e-10,
+            "got {cost}, expected {expected}"
+        );
     }
 
     #[test]
@@ -258,9 +352,18 @@ mod tests {
 
     #[test]
     fn test_from_str_full_model_ids() {
-        assert_eq!("claude-opus-4-6".parse::<ModelType>().unwrap(), ModelType::Opus);
-        assert_eq!("claude-sonnet-4-6".parse::<ModelType>().unwrap(), ModelType::Sonnet);
-        assert_eq!("claude-haiku-4-5-20251001".parse::<ModelType>().unwrap(), ModelType::Haiku);
+        assert_eq!(
+            "claude-opus-4-6".parse::<ModelType>().unwrap(),
+            ModelType::Opus
+        );
+        assert_eq!(
+            "claude-sonnet-4-6".parse::<ModelType>().unwrap(),
+            ModelType::Sonnet
+        );
+        assert_eq!(
+            "claude-haiku-4-5-20251001".parse::<ModelType>().unwrap(),
+            ModelType::Haiku
+        );
     }
 
     #[test]
@@ -315,5 +418,74 @@ mod tests {
         assert_eq!(json, r#""log""#);
         let parsed: DataSource = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, source);
+    }
+
+    #[test]
+    fn subscription_grouping_claude_logs() {
+        assert_eq!(
+            subscription_for(DataSource::Log, Provider::Anthropic),
+            Subscription::Claude
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_claude_quota() {
+        assert_eq!(
+            subscription_for(DataSource::ClaudeQuota, Provider::Anthropic),
+            Subscription::Claude
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_codex_rollout() {
+        assert_eq!(
+            subscription_for(DataSource::CodexRollout, Provider::OpenAiCodex),
+            Subscription::ChatGpt
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_pi_openai_codex() {
+        assert_eq!(
+            subscription_for(DataSource::PiSession, Provider::OpenAiCodex),
+            Subscription::ChatGpt
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_pi_opencode_go() {
+        assert_eq!(
+            subscription_for(DataSource::PiSession, Provider::OpencodeGo),
+            Subscription::OpencodeGo
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_opencode_db() {
+        assert_eq!(
+            subscription_for(DataSource::OpencodeDb, Provider::Other),
+            Subscription::OpencodeGo
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_other_provider() {
+        assert_eq!(
+            subscription_for(DataSource::PiSession, Provider::Other),
+            Subscription::Other
+        );
+        assert_eq!(
+            subscription_for(DataSource::PiSession, Provider::Anthropic),
+            Subscription::Other
+        );
+    }
+
+    #[test]
+    fn test_subscription_serde_names() {
+        let json = serde_json::to_string(&Subscription::ChatGpt).unwrap();
+        assert_eq!(json, r#""chatgpt""#);
+        let json = serde_json::to_string(&Subscription::OpencodeGo).unwrap();
+        assert_eq!(json, r#""opencode-go""#);
+        assert_eq!(Provider::OpenAiCodex.to_string(), "openai-codex");
     }
 }
