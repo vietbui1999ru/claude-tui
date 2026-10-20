@@ -6,6 +6,11 @@
 - `crates/claude-daemon/src/collector.rs:278-281` drops any record whose model does not parse into `ModelType`.
 - `claude_common::paths::config_path()` exists but nothing loads a config file. `toml` is not a dependency yet.
 
+## Progress from the first run (stopped by provider timeouts)
+
+- AC-5 is done and committed (`feat(common): provider and subscription grouping (AC-5)`). Do not redo it. Fix one bug in it first, as part of AC-7's commit: `Provider` uses `#[serde(rename_all = "kebab-case")]`, which serialises `OpenAiCodex` as `open-ai-codex`, but `as_str()` says `openai-codex`. Add `#[serde(rename = "openai-codex")]` and a round-trip test.
+- The workspace was reformatted with `cargo fmt` and committed. Start from AC-7.
+
 ## Do
 
 1. **AC-5:** add `Provider` and `Subscription` (`Claude`, `ChatGpt`, `OpencodeGo`, `Other`) to claude-common. Add a pure function `subscription_for(source, provider) -> Subscription` that implements the AC-5 grouping:
