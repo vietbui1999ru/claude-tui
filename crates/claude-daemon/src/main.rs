@@ -74,12 +74,10 @@ async fn main() {
     // Handle SIGINT/SIGTERM for graceful shutdown
     let cancel_signal = cancel.clone();
     tokio::spawn(async move {
-        let mut sigint =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                .expect("failed to register SIGINT handler");
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM handler");
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("failed to register SIGINT handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
 
         tokio::select! {
             _ = sigint.recv() => {

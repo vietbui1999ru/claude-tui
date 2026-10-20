@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use claude_common::protocol::{
-    BudgetSetResponse, CollectorStatus, RpcError, RpcMethod, RpcRequest, RpcResponse,
-    StatusResponse, INTERNAL_ERROR, NOT_FOUND, PARSE_ERROR,
+    BudgetSetResponse, CollectorStatus, INTERNAL_ERROR, NOT_FOUND, PARSE_ERROR, RpcError,
+    RpcMethod, RpcRequest, RpcResponse, StatusResponse,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -62,11 +62,8 @@ impl IpcServer {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                &self.socket_path,
-                std::fs::Permissions::from_mode(0o600),
-            )
-            .ok();
+            std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
+                .ok();
         }
 
         info!(path = %self.socket_path.display(), "IPC server listening");
@@ -128,14 +125,15 @@ async fn handle_client(
 
         // Reject oversized requests to prevent OOM
         if line.len() > MAX_REQUEST_LINE_LEN {
-            warn!("dropping connection: request line too large ({} bytes)", line.len());
+            warn!(
+                "dropping connection: request line too large ({} bytes)",
+                line.len()
+            );
             break;
         }
 
         let response = match serde_json::from_str::<RpcRequest>(&line) {
-            Ok(request) => {
-                handle_request(&storage, &request, start_time, &collector_status).await
-            }
+            Ok(request) => handle_request(&storage, &request, start_time, &collector_status).await,
             Err(e) => RpcResponse::error(
                 0,
                 RpcError {
@@ -187,13 +185,9 @@ async fn handle_request(
                 });
 
             let current_model = sessions.sessions.first().map(|s| s.model);
-            let budget_pct = budget.daily_limit_usd.map(|limit| {
-                if limit > 0.0 {
-                    cost_today / limit
-                } else {
-                    0.0
-                }
-            });
+            let budget_pct = budget
+                .daily_limit_usd
+                .map(|limit| if limit > 0.0 { cost_today / limit } else { 0.0 });
 
             let resp = StatusResponse {
                 daemon_uptime_secs: uptime,
@@ -208,9 +202,10 @@ async fn handle_request(
         RpcMethod::UsageQuery(params) => {
             let storage = storage.lock().await;
             match storage.query_usage(&params) {
-                Ok(result) => {
-                    RpcResponse::success(request.id, serde_json::to_value(&result).unwrap_or_default())
-                }
+                Ok(result) => RpcResponse::success(
+                    request.id,
+                    serde_json::to_value(&result).unwrap_or_default(),
+                ),
                 Err(e) => RpcResponse::error(
                     request.id,
                     RpcError {
@@ -224,9 +219,10 @@ async fn handle_request(
         RpcMethod::UsageSummary(params) => {
             let storage = storage.lock().await;
             match storage.get_summary(&params) {
-                Ok(result) => {
-                    RpcResponse::success(request.id, serde_json::to_value(&result).unwrap_or_default())
-                }
+                Ok(result) => RpcResponse::success(
+                    request.id,
+                    serde_json::to_value(&result).unwrap_or_default(),
+                ),
                 Err(e) => RpcResponse::error(
                     request.id,
                     RpcError {
@@ -240,9 +236,10 @@ async fn handle_request(
         RpcMethod::SessionsList(params) => {
             let storage = storage.lock().await;
             match storage.list_sessions(&params) {
-                Ok(result) => {
-                    RpcResponse::success(request.id, serde_json::to_value(&result).unwrap_or_default())
-                }
+                Ok(result) => RpcResponse::success(
+                    request.id,
+                    serde_json::to_value(&result).unwrap_or_default(),
+                ),
                 Err(e) => RpcResponse::error(
                     request.id,
                     RpcError {
@@ -315,9 +312,10 @@ async fn handle_request(
         RpcMethod::ModelsCompare(params) => {
             let storage = storage.lock().await;
             match storage.get_model_stats(&params) {
-                Ok(result) => {
-                    RpcResponse::success(request.id, serde_json::to_value(&result).unwrap_or_default())
-                }
+                Ok(result) => RpcResponse::success(
+                    request.id,
+                    serde_json::to_value(&result).unwrap_or_default(),
+                ),
                 Err(e) => RpcResponse::error(
                     request.id,
                     RpcError {

@@ -5,9 +5,8 @@ use crate::theme;
 use crate::widgets::{cost_breakdown, live_monitor, model_compare, token_chart};
 use chrono::Utc;
 use claude_common::{
-    ActiveSession, BudgetConfig, DailyAggregate, ModelType,
-    ModelsCompareResponse, SessionsListParams, StatusResponse, UsageSummaryParams,
-    UsageSummaryResponse,
+    ActiveSession, BudgetConfig, DailyAggregate, ModelType, ModelsCompareResponse,
+    SessionsListParams, StatusResponse, UsageSummaryParams, UsageSummaryResponse,
 };
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
@@ -114,7 +113,10 @@ impl App {
         app
     }
 
-    pub async fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let tick_rate = Duration::from_millis(100); // 100ms for spinner animation
         let data_refresh_interval = Duration::from_secs(30);
 
@@ -247,9 +249,7 @@ impl App {
             self.sessions = sessions_resp.sessions;
         }
 
-        let compare_params = claude_common::ModelsCompareParams {
-            time_range: None,
-        };
+        let compare_params = claude_common::ModelsCompareParams { time_range: None };
         if let Ok(model_stats) = client.compare_models(compare_params).await {
             self.model_stats = model_stats;
         }
@@ -283,7 +283,7 @@ impl App {
         let main_chunks = Layout::vertical([
             Constraint::Length(1), // header
             Constraint::Length(1), // tab bar
-            Constraint::Min(20),  // content
+            Constraint::Min(20),   // content
             Constraint::Length(1), // footer
         ])
         .split(size);
@@ -351,11 +351,9 @@ impl App {
             self.render_tab_content(frame, inner);
         } else {
             // 70/30 split
-            let content_chunks = Layout::horizontal([
-                Constraint::Percentage(70),
-                Constraint::Percentage(30),
-            ])
-            .split(area);
+            let content_chunks =
+                Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
+                    .split(area);
 
             // Main content
             let main_block = Block::default()
@@ -388,12 +386,7 @@ impl App {
                     budget: &self.budget,
                     monthly_spend: self.usage_summary.total_cost_usd,
                 };
-                cost_breakdown::render_cost_breakdown(
-                    frame,
-                    area,
-                    &cost_data,
-                    self.project_scroll,
-                );
+                cost_breakdown::render_cost_breakdown(frame, area, &cost_data, self.project_scroll);
             }
             Tab::Models => {
                 model_compare::render_model_compare(frame, area, &self.model_stats);
@@ -436,7 +429,7 @@ impl App {
             Constraint::Length(1), // model 1
             Constraint::Length(1), // model 2
             Constraint::Length(1), // model 3
-            Constraint::Min(0),   // fill
+            Constraint::Min(0),    // fill
         ])
         .split(inner);
 
@@ -546,11 +539,8 @@ impl App {
             chunks[10],
         );
         frame.render_widget(
-            Paragraph::new(format!(
-                " ${:.2} / ${:.2}",
-                monthly_spend, monthly_limit
-            ))
-            .style(Style::new().fg(theme::COLOR_TEXT_DIM)),
+            Paragraph::new(format!(" ${:.2} / ${:.2}", monthly_spend, monthly_limit))
+                .style(Style::new().fg(theme::COLOR_TEXT_DIM)),
             chunks[11],
         );
 

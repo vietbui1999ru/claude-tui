@@ -40,7 +40,7 @@ pub fn render_token_chart(
 ) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // time range selector
-        Constraint::Min(6),   // chart
+        Constraint::Min(6),    // chart
         Constraint::Length(1), // legend
     ])
     .split(area);
@@ -51,8 +51,8 @@ pub fn render_token_chart(
         .highlight_style(theme::STYLE_TAB_ACTIVE)
         .style(theme::STYLE_TAB_INACTIVE)
         .divider(" ");
-    let range_line = Layout::horizontal([Constraint::Fill(1), Constraint::Length(20)])
-        .split(chunks[0]);
+    let range_line =
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(20)]).split(chunks[0]);
     frame.render_widget(
         Paragraph::new("  Token Usage").style(Style::new().fg(theme::COLOR_PRIMARY).bold()),
         range_line[0],
@@ -82,11 +82,7 @@ pub fn render_token_chart(
         entry.2 += agg.total_cache_read_tokens + agg.total_cache_write_tokens;
     }
 
-    let max_val = daily
-        .values()
-        .map(|(i, o, c)| i + o + c)
-        .max()
-        .unwrap_or(1);
+    let max_val = daily.values().map(|(i, o, c)| i + o + c).max().unwrap_or(1);
 
     // Build bars: 3 bars per date (input, output, cache), grouped visually
     let all_bars: Vec<Bar> = daily

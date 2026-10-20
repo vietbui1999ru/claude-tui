@@ -75,8 +75,9 @@ impl Collector {
         // Track per-file byte offsets so only new lines are read each cycle.
         let mut file_cursors: HashMap<PathBuf, u64> = HashMap::new();
 
-        let mut interval =
-            tokio::time::interval(tokio::time::Duration::from_secs(self.config.poll_interval_secs));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+            self.config.poll_interval_secs,
+        ));
 
         // First scan fires immediately (no wait).
         let mut immediate = true;
@@ -176,8 +177,7 @@ fn read_new_lines(
     file_cursors: &mut HashMap<PathBuf, u64>,
     records: &mut Vec<UsageRecord>,
 ) -> Result<(), CollectorError> {
-    let file =
-        std::fs::File::open(path).map_err(|e| CollectorError::LogWatch(e.to_string()))?;
+    let file = std::fs::File::open(path).map_err(|e| CollectorError::LogWatch(e.to_string()))?;
 
     let file_len = file
         .metadata()
@@ -260,10 +260,7 @@ fn parse_log_line(line: &str) -> Result<Option<UsageRecord>, CollectorError> {
     // Extract model and usage — nested under `message` for Claude Code, top-level otherwise
     let (model_str, usage) = if is_claude_code {
         let msg = value.get("message").unwrap(); // safe: checked above
-        (
-            msg.get("model").and_then(|v| v.as_str()),
-            msg.get("usage"),
-        )
+        (msg.get("model").and_then(|v| v.as_str()), msg.get("usage"))
     } else {
         (
             value.get("model").and_then(|v| v.as_str()),
@@ -314,8 +311,12 @@ fn parse_log_line(line: &str) -> Result<Option<UsageRecord>, CollectorError> {
         return Ok(None);
     }
 
-    let cost_usd =
-        model.compute_cost(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
+    let cost_usd = model.compute_cost(
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+    );
     // Truncate to 6 decimal places
     let cost_usd = (cost_usd * 1_000_000.0).round() / 1_000_000.0;
 
@@ -351,8 +352,7 @@ fn parse_log_line(line: &str) -> Result<Option<UsageRecord>, CollectorError> {
 
 /// Fixed namespace UUID for deterministic log-based UUID generation.
 const LOG_UUID_NAMESPACE: Uuid = Uuid::from_bytes([
-    0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
-    0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+    0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
 ]);
 
 /// Generate a deterministic UUID from log line data for deduplication.
@@ -468,7 +468,10 @@ mod tests {
             .with_timezone(&Utc);
         let uuid1 = generate_log_uuid(ts, &ModelType::Sonnet, 1234, 567);
         let uuid2 = generate_log_uuid(ts, &ModelType::Sonnet, 1234, 568);
-        assert_ne!(uuid1, uuid2, "different inputs must produce different UUIDs");
+        assert_ne!(
+            uuid1, uuid2,
+            "different inputs must produce different UUIDs"
+        );
     }
 
     #[test]

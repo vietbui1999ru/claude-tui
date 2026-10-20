@@ -1,16 +1,15 @@
 use std::path::Path;
 
 use chrono::{NaiveDate, Utc};
-use claude_common::{
-    ActiveSession, BudgetConfig, DailyAggregate, DataSource, ModelType, SessionStatus,
-    UsageRecord,
-};
 use claude_common::protocol::{
-    ModelsCompareParams, ModelsCompareResponse, ModelStats, SessionsListParams,
+    ModelStats, ModelsCompareParams, ModelsCompareResponse, SessionsListParams,
     SessionsListResponse, UsageQueryParams, UsageQueryResponse, UsageSummaryParams,
     UsageSummaryResponse,
 };
-use rusqlite::{params, Connection};
+use claude_common::{
+    ActiveSession, BudgetConfig, DailyAggregate, DataSource, ModelType, SessionStatus, UsageRecord,
+};
+use rusqlite::{Connection, params};
 
 use crate::StorageError;
 
@@ -28,8 +27,7 @@ impl Storage {
             }
         }
 
-        let conn =
-            Connection::open(db_path).map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let conn = Connection::open(db_path).map_err(|e| StorageError::Sqlite(e.to_string()))?;
 
         // Enable WAL mode for better concurrent read performance.
         conn.execute_batch("PRAGMA journal_mode=WAL;")
@@ -142,10 +140,12 @@ impl Storage {
             INSERT OR IGNORE INTO schema_version (version) VALUES (1);
         "#;
 
-        self.conn.execute_batch(sql).map_err(|e| StorageError::Migration {
-            version: 1,
-            reason: e.to_string(),
-        })?;
+        self.conn
+            .execute_batch(sql)
+            .map_err(|e| StorageError::Migration {
+                version: 1,
+                reason: e.to_string(),
+            })?;
 
         Ok(())
     }
@@ -178,7 +178,10 @@ impl Storage {
     }
 
     pub fn insert_usage_batch(&mut self, records: &[UsageRecord]) -> Result<(), StorageError> {
-        let tx = self.conn.transaction().map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         for record in records {
             let model_str = record.model.to_string().to_lowercase();
             let source_str = "log";
@@ -200,7 +203,8 @@ impl Storage {
             )
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         }
-        tx.commit().map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        tx.commit()
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
     }
 
@@ -234,7 +238,8 @@ impl Storage {
 
         // Get total count
         let count_sql = format!("SELECT COUNT(*) FROM usage_records {where_sql}");
-        let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+        let bind_refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
         let total_count: u64 = self
             .conn
             .query_row(&count_sql, bind_refs.as_slice(), |row| row.get(0))
@@ -244,7 +249,8 @@ impl Storage {
         let query_sql = format!(
             "SELECT id, uuid, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, session_id, project, source FROM usage_records {where_sql} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         );
-        let mut all_binds: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+        let mut all_binds: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
         let limit_val = params.limit as i64;
         let offset_val = params.offset as i64;
         all_binds.push(&limit_val);
@@ -306,7 +312,8 @@ impl Storage {
              ORDER BY date ASC"
         );
 
-        let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+        let bind_refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
         let mut stmt = self
             .conn
             .prepare(&sql)
@@ -319,9 +326,7 @@ impl Storage {
                 Ok(DailyAggregate {
                     date: NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
                         .unwrap_or_else(|_| Utc::now().date_naive()),
-                    model: model_str
-                        .parse()
-                        .unwrap_or(ModelType::Sonnet),
+                    model: model_str.parse().unwrap_or(ModelType::Sonnet),
                     total_input_tokens: row.get::<_, i64>(2)? as u64,
                     total_output_tokens: row.get::<_, i64>(3)? as u64,
                     total_cache_read_tokens: row.get::<_, i64>(4)? as u64,
@@ -366,7 +371,8 @@ impl Storage {
         }
         sql.push_str(" ORDER BY date ASC");
 
-        let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+        let bind_refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
         let mut stmt = self
             .conn
             .prepare(&sql)
@@ -402,7 +408,10 @@ impl Storage {
 
         // Delete existing aggregates for this date
         self.conn
-            .execute("DELETE FROM daily_aggregates WHERE date = ?1", params![date_str])
+            .execute(
+                "DELETE FROM daily_aggregates WHERE date = ?1",
+                params![date_str],
+            )
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
 
         // Recompute from usage_records
@@ -480,7 +489,8 @@ impl Storage {
 
         // Count
         let count_sql = format!("SELECT COUNT(*) FROM sessions {where_sql}");
-        let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+        let bind_refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
         let total_count: u64 = self
             .conn
             .query_row(&count_sql, bind_refs.as_slice(), |row| row.get(0))
@@ -490,7 +500,8 @@ impl Storage {
         let query_sql = format!(
             "SELECT session_id, model, started_at, last_activity, total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_write_tokens, cost_usd, request_count, status, project FROM sessions {where_sql} ORDER BY last_activity DESC LIMIT ? OFFSET ?"
         );
-        let mut all_binds: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+        let mut all_binds: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
         let limit_val = params.limit as i64;
         let offset_val = params.offset as i64;
         all_binds.push(&limit_val);
@@ -538,9 +549,7 @@ impl Storage {
     pub fn rebuild_sessions(&self) -> Result<(), StorageError> {
         let cutoff = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
         self.conn
-            .execute_batch(
-                "DELETE FROM sessions;"
-            )
+            .execute_batch("DELETE FROM sessions;")
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         self.conn
             .execute(
@@ -592,21 +601,29 @@ impl Storage {
     pub fn set_budget(&self, config: &BudgetConfig) -> Result<(), StorageError> {
         if let Some(limit) = config.daily_limit_usd {
             if limit < 0.0 {
-                return Err(StorageError::Query("daily_limit_usd must be >= 0".to_string()));
+                return Err(StorageError::Query(
+                    "daily_limit_usd must be >= 0".to_string(),
+                ));
             }
         }
         if let Some(limit) = config.weekly_limit_usd {
             if limit < 0.0 {
-                return Err(StorageError::Query("weekly_limit_usd must be >= 0".to_string()));
+                return Err(StorageError::Query(
+                    "weekly_limit_usd must be >= 0".to_string(),
+                ));
             }
         }
         if let Some(limit) = config.monthly_limit_usd {
             if limit < 0.0 {
-                return Err(StorageError::Query("monthly_limit_usd must be >= 0".to_string()));
+                return Err(StorageError::Query(
+                    "monthly_limit_usd must be >= 0".to_string(),
+                ));
             }
         }
         if !(0.0..=1.0).contains(&config.alert_threshold_pct) {
-            return Err(StorageError::Query("alert_threshold_pct must be in 0.0..=1.0".to_string()));
+            return Err(StorageError::Query(
+                "alert_threshold_pct must be in 0.0..=1.0".to_string(),
+            ));
         }
         self.conn
             .execute(
@@ -625,9 +642,17 @@ impl Storage {
     // --- Aggregation helpers ---
 
     pub fn get_cost_today(&self) -> Result<f64, StorageError> {
-        let today_start = Utc::now().date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc().to_rfc3339();
+        let today_start = Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .to_rfc3339();
         let tomorrow_start = (Utc::now().date_naive() + chrono::Duration::days(1))
-            .and_hms_opt(0, 0, 0).unwrap().and_utc().to_rfc3339();
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .to_rfc3339();
         let cost: f64 = self
             .conn
             .query_row(
@@ -669,7 +694,8 @@ impl Storage {
              GROUP BY model"
         );
 
-        let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+        let bind_refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
         let mut stmt = self
             .conn
             .prepare(&sql)
@@ -715,21 +741,33 @@ fn row_to_usage_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord>
     let _source_str: String = row.get(11)?;
 
     let uuid = uuid_str.parse().map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad uuid: {e}"))
-        ))
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("bad uuid: {e}"),
+            )),
+        )
     })?;
     let timestamp = chrono::DateTime::parse_from_rfc3339(&ts_str)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(
-                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad timestamp: {e}"))
-            ))
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("bad timestamp: {e}"),
+                )),
+            )
         })?;
     let model: ModelType = model_str.parse().map_err(|e: String| {
-        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        ))
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
     })?;
 
     Ok(UsageRecord {
@@ -755,23 +793,35 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActiveSession> {
     let status_str: String = row.get(10)?;
 
     let model: ModelType = model_str.parse().map_err(|e: String| {
-        rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        ))
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
     })?;
     let started_at = chrono::DateTime::parse_from_rfc3339(&started_str)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(
-                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad timestamp: {e}"))
-            ))
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("bad timestamp: {e}"),
+                )),
+            )
         })?;
     let last_activity = chrono::DateTime::parse_from_rfc3339(&activity_str)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(
-                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad timestamp: {e}"))
-            ))
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("bad timestamp: {e}"),
+                )),
+            )
         })?;
 
     let status = match status_str.as_str() {
@@ -914,8 +964,12 @@ mod tests {
     #[test]
     fn test_query_with_model_filter() {
         let storage = test_storage();
-        storage.insert_usage(&make_record(ModelType::Sonnet, 100, 50)).unwrap();
-        storage.insert_usage(&make_record(ModelType::Opus, 200, 100)).unwrap();
+        storage
+            .insert_usage(&make_record(ModelType::Sonnet, 100, 50))
+            .unwrap();
+        storage
+            .insert_usage(&make_record(ModelType::Opus, 200, 100))
+            .unwrap();
 
         let result = storage
             .query_usage(&UsageQueryParams {
@@ -1058,16 +1112,26 @@ mod tests {
     #[test]
     fn test_get_model_stats() {
         let storage = test_storage();
-        storage.insert_usage(&make_record(ModelType::Sonnet, 1000, 500)).unwrap();
-        storage.insert_usage(&make_record(ModelType::Sonnet, 2000, 1000)).unwrap();
-        storage.insert_usage(&make_record(ModelType::Opus, 500, 250)).unwrap();
+        storage
+            .insert_usage(&make_record(ModelType::Sonnet, 1000, 500))
+            .unwrap();
+        storage
+            .insert_usage(&make_record(ModelType::Sonnet, 2000, 1000))
+            .unwrap();
+        storage
+            .insert_usage(&make_record(ModelType::Opus, 500, 250))
+            .unwrap();
 
         let stats = storage
             .get_model_stats(&ModelsCompareParams { time_range: None })
             .unwrap();
         assert_eq!(stats.models.len(), 2);
 
-        let sonnet_stats = stats.models.iter().find(|m| m.model == ModelType::Sonnet).unwrap();
+        let sonnet_stats = stats
+            .models
+            .iter()
+            .find(|m| m.model == ModelType::Sonnet)
+            .unwrap();
         assert_eq!(sonnet_stats.request_count, 2);
         assert_eq!(sonnet_stats.total_input_tokens, 3000);
     }
@@ -1075,8 +1139,12 @@ mod tests {
     #[test]
     fn test_get_summary() {
         let storage = test_storage();
-        storage.insert_usage(&make_record(ModelType::Sonnet, 1000, 500)).unwrap();
-        storage.insert_usage(&make_record(ModelType::Opus, 2000, 1000)).unwrap();
+        storage
+            .insert_usage(&make_record(ModelType::Sonnet, 1000, 500))
+            .unwrap();
+        storage
+            .insert_usage(&make_record(ModelType::Opus, 2000, 1000))
+            .unwrap();
 
         let summary = storage
             .get_summary(&UsageSummaryParams {

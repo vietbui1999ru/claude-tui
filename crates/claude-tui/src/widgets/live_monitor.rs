@@ -1,7 +1,7 @@
 use crate::format::{format_duration_short, format_tokens_comma};
 use crate::theme;
-use claude_common::{ActiveSession, SessionStatus};
 use chrono::Utc;
+use claude_common::{ActiveSession, SessionStatus};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
@@ -80,9 +80,11 @@ fn render_session_list(
         .borders(Borders::ALL)
         .border_style(Style::new().fg(theme::COLOR_SECONDARY));
 
-    let header = Row::new(vec!["#", "Session", "Model", "Status", "Tokens", "Duration"])
-        .style(Style::new().fg(theme::COLOR_PRIMARY).bold())
-        .bottom_margin(1);
+    let header = Row::new(vec![
+        "#", "Session", "Model", "Status", "Tokens", "Duration",
+    ])
+    .style(Style::new().fg(theme::COLOR_PRIMARY).bold())
+    .bottom_margin(1);
 
     let now = Utc::now();
     let rows: Vec<Row> = sessions

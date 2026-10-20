@@ -1,15 +1,15 @@
 use claude_common::{
     ActiveSession, BudgetConfig, BudgetSetResponse, IpcError, ModelsCompareParams,
     ModelsCompareResponse, RpcRequest, RpcResponse, SessionsGetParams, SessionsListParams,
-    SessionsListResponse, StatusResponse, UsageQueryParams, UsageQueryResponse,
-    UsageSummaryParams, UsageSummaryResponse,
+    SessionsListResponse, StatusResponse, UsageQueryParams, UsageQueryResponse, UsageSummaryParams,
+    UsageSummaryResponse,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 const READ_TIMEOUT_SECS: u64 = 10;
 
@@ -48,7 +48,11 @@ impl DaemonClient {
             .map_or(false, |guard| guard.is_some())
     }
 
-    async fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, IpcError> {
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, IpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = RpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -57,15 +61,14 @@ impl DaemonClient {
             params,
         };
 
-        let mut req_bytes = serde_json::to_vec(&req).map_err(|e| IpcError::Serialization(e.to_string()))?;
+        let mut req_bytes =
+            serde_json::to_vec(&req).map_err(|e| IpcError::Serialization(e.to_string()))?;
         req_bytes.push(b'\n');
 
         let mut guard = self.stream.lock().await;
-        let stream = guard
-            .as_mut()
-            .ok_or_else(|| IpcError::DaemonNotRunning {
-                path: self.socket_path.clone(),
-            })?;
+        let stream = guard.as_mut().ok_or_else(|| IpcError::DaemonNotRunning {
+            path: self.socket_path.clone(),
+        })?;
 
         stream
             .get_mut()
@@ -90,7 +93,7 @@ impl DaemonClient {
             Err(_) => {
                 return Err(IpcError::Timeout {
                     timeout_ms: READ_TIMEOUT_SECS * 1000,
-                })
+                });
             }
         }
 
