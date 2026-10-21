@@ -1,7 +1,7 @@
 ---
 kind: spec
 work_type: spec
-status: draft
+status: approved
 branch: feat/multi-provider-usage
 goal: "One local dashboard for context, usage, quota and approximate cost across the Claude, ChatGPT (Codex) and opencode-go subscriptions"
 task: "Re-spec claude-tui from a Claude-only usage TUI into a multi-provider, subscription-grouped dashboard with a sketchybar line"
