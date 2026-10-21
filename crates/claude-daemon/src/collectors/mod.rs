@@ -232,6 +232,74 @@ mod tests {
         let found = walk_files(Path::new("/definitely/not/here/claude-tui"), &|_| true);
         assert!(found.is_empty());
     }
+
+    /// A temp directory that never touches the real home directory.
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("claude-tui-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn claude_quota_collector_reads_configured_status_path() {
+        let dir = temp_dir();
+        let status_path = dir.join("claude-status.json");
+        std::fs::write(
+            &status_path,
+            r#"{"rate_limits":{"five_hour":{"used_percentage":34.0}}}"#,
+        )
+        .unwrap();
+        let config_path = dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!("claude_status_path = \"{}\"\n", status_path.display()),
+        )
+        .unwrap();
+
+        let mut config = CollectorConfig::from_config_file(&config_path);
+        assert_eq!(config.claude_status_path, status_path);
+        // Point every other root at the temp dir, so no collector can read the
+        // real one.
+        config.claude_roots = vec![dir.join("no-claude")];
+        config.codex_roots = vec![dir.join("no-codex")];
+        config.pi_roots = vec![dir.join("no-pi")];
+        config.opencode_db = dir.join("no-opencode.db");
+        config.claude_json_path = dir.join("no-claude.json");
+
+        let prices = claude_common::PriceBook::embedded().unwrap();
+        let mut collectors = default_collectors(&config, prices);
+        let quota = collectors
+            .iter_mut()
+            .find(|c| c.id() == claude_quota::COLLECTOR_ID)
+            .expect("the quota collector is in the default set");
+        let output = quota.collect(&Cursor::new()).unwrap();
+
+        assert_eq!(output.snapshots.len(), 1, "only five_hour is set");
+        assert_eq!(output.snapshots[0].window, "five_hour:live");
+        assert_eq!(output.snapshots[0].used_pct, Some(34.0));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn claude_quota_status_path_defaults_without_a_config_key() {
+        let dir = temp_dir();
+        let config_path = dir.join("config.toml");
+        std::fs::write(&config_path, "# no claude_status_path here\n").unwrap();
+
+        let config = CollectorConfig::from_config_file(&config_path);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            config.claude_status_path,
+            CollectorConfig::default().claude_status_path,
+            "the default stays ~/.local/state/claude-tui/claude-status.json"
+        );
+        assert!(
+            config
+                .claude_status_path
+                .ends_with(".local/state/claude-tui/claude-status.json")
+        );
+    }
 }
 
 /// Run one collector for one pass: load its cursor, collect, store the output,
@@ -299,6 +367,20 @@ impl Default for CollectorConfig {
             claude_status_path: default_claude_status_path(),
             claude_json_path: default_claude_json_path(),
         }
+    }
+}
+
+impl CollectorConfig {
+    /// The default config with the overrides from the daemon config file at
+    /// `path` applied, such as the Claude quota snapshot location.
+    ///
+    /// A missing file or a file without the key leaves every default in place.
+    pub fn from_config_file(path: &std::path::Path) -> Self {
+        let mut config = Self::default();
+        if let Some(status_path) = claude_common::config::claude_status_path_override_from(path) {
+            config.claude_status_path = status_path;
+        }
+        config
     }
 }
 

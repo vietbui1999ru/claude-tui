@@ -7,7 +7,7 @@
 //! price: its tokens are still counted and its cost is reported as unknown.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -133,6 +133,30 @@ fn parse_price_tables(text: &str, origin: &str) -> Result<BTreeMap<String, Price
         reason: e.to_string(),
     })?;
     Ok(parsed.prices)
+}
+
+/// The non-`[prices]` keys of the daemon config file that this crate reads.
+#[derive(Debug, Default, Deserialize)]
+struct DaemonKeys {
+    #[serde(default)]
+    claude_status_path: Option<PathBuf>,
+}
+
+/// The `claude_status_path` set in [`crate::paths::config_path`], if any.
+pub fn claude_status_path_override() -> Option<PathBuf> {
+    claude_status_path_override_from(&crate::paths::config_path())
+}
+
+/// The `claude_status_path` set in the config file at `path`, if any.
+///
+/// A missing, unreadable or malformed file means no override, so the caller
+/// falls back to the default snapshot path. A config error is already reported
+/// when the prices are loaded; this key is optional by design.
+pub fn claude_status_path_override_from(path: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let keys: DaemonKeys = toml::from_str(&text).ok()?;
+    keys.claude_status_path
+        .filter(|path| !path.as_os_str().is_empty())
 }
 
 #[cfg(test)]
@@ -303,5 +327,53 @@ mod tests {
         let err = PriceBook::from_toml_str("[prices.\"broken\"\ninput = 1.0", "test")
             .expect_err("malformed TOML must error");
         assert!(err.to_string().contains("config"));
+    }
+
+    #[test]
+    fn config_claude_status_path_override_is_read() {
+        let path = write_temp_config(
+            r#"
+            claude_status_path = "/tmp/claude-status-from-config.json"
+
+            [prices."claude"]
+            input = 1.0
+            output = 2.0
+            cache_read = 0.1
+            cache_write = 1.0
+            "#,
+        );
+        let override_path = claude_status_path_override_from(&path);
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(
+            override_path,
+            Some(PathBuf::from("/tmp/claude-status-from-config.json"))
+        );
+    }
+
+    #[test]
+    fn config_claude_status_path_absent_is_no_override() {
+        let path = write_temp_config(
+            r#"
+            [prices."claude"]
+            input = 1.0
+            output = 2.0
+            cache_read = 0.1
+            cache_write = 1.0
+            "#,
+        );
+        let override_path = claude_status_path_override_from(&path);
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(override_path, None);
+    }
+
+    #[test]
+    fn config_claude_status_path_missing_file_is_no_override() {
+        let path = std::env::temp_dir().join(format!(
+            "claude-tui-config-absent-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        assert_eq!(claude_status_path_override_from(&path), None);
     }
 }

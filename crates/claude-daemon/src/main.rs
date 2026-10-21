@@ -49,7 +49,7 @@ async fn main() {
     let cancel = CancellationToken::new();
 
     // Spawn collectors
-    let collector_config = CollectorConfig::default();
+    let collector_config = CollectorConfig::from_config_file(&claude_common::config_path());
     let prices = load_prices();
     let collectors = default_collectors(&collector_config, prices);
     let collector_handle = tokio::spawn(run_loop(
