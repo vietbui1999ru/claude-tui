@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use claude_common::protocol::CollectorStatus;
-use claude_common::{CollectorError, DataSource, ModelType, PriceBook, UsageRecord};
+use claude_common::{
+    CollectorError, CostSource, DataSource, PriceBook, Provider, UsageRecord, subscription_for,
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -289,10 +291,9 @@ fn parse_log_line(line: &str, prices: &PriceBook) -> Result<Option<UsageRecord>,
         return Ok(None);
     };
 
-    let model: ModelType = match model_str.parse() {
-        Ok(m) => m,
-        Err(_) => return Ok(None), // skip unknown models silently
-    };
+    // The model id is kept verbatim: prices resolve it later, by substring, and
+    // a model we have never seen keeps its tokens with an unknown cost.
+    let model = model_str.to_string();
 
     let input_tokens = usage
         .get("input_tokens")
@@ -328,20 +329,24 @@ fn parse_log_line(line: &str, prices: &PriceBook) -> Result<Option<UsageRecord>,
         return Ok(None);
     }
 
-    // Truncate to 6 decimal places. Until AC-6 makes the field optional, an
-    // unconfigured model's cost is recorded as zero.
+    // Truncate to 6 decimal places. A model with no configured price keeps its
+    // tokens and its cost is unknown.
     let cost_usd = prices
         .cost(
-            model_str,
+            &model,
             input_tokens,
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
         )
-        .map(|cost| (cost * 1_000_000.0).round() / 1_000_000.0)
-        .unwrap_or(0.0);
+        .map(|cost| (cost * 1_000_000.0).round() / 1_000_000.0);
+    let cost_source = match cost_usd {
+        Some(_) => CostSource::Computed,
+        None => CostSource::Unknown,
+    };
 
     let uuid = generate_log_uuid(timestamp, &model, input_tokens, output_tokens);
+    let provider = Provider::Anthropic;
 
     // Session ID: Claude Code uses "sessionId", generic logs use "session_id"
     let session_id = value
@@ -360,11 +365,15 @@ fn parse_log_line(line: &str, prices: &PriceBook) -> Result<Option<UsageRecord>,
         uuid,
         timestamp,
         model,
+        provider,
+        subscription: subscription_for(DataSource::Log, provider),
         input_tokens,
         output_tokens,
         cache_read_tokens,
         cache_write_tokens,
         cost_usd,
+        cost_source,
+        dedup_key: uuid.to_string(),
         session_id,
         project,
         source: DataSource::Log,
@@ -380,14 +389,14 @@ const LOG_UUID_NAMESPACE: Uuid = Uuid::from_bytes([
 /// Uses UUID v5 (SHA-1 based) with a fixed namespace for stability across Rust versions.
 fn generate_log_uuid(
     timestamp: DateTime<Utc>,
-    model: &ModelType,
+    model: &str,
     input_tokens: u64,
     output_tokens: u64,
 ) -> Uuid {
     let name = format!(
         "{}:{}:{}:{}",
         timestamp.timestamp_millis(),
-        model.as_str(),
+        model,
         input_tokens,
         output_tokens,
     );
@@ -397,6 +406,7 @@ fn generate_log_uuid(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use claude_common::Subscription;
 
     /// Embedded default prices: tests must never read the real home config.
     fn prices() -> PriceBook {
@@ -404,21 +414,38 @@ mod tests {
     }
 
     #[test]
+    fn unknown_model_kept_without_price() {
+        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"mystery-model-9","usage":{"input_tokens":1234,"output_tokens":567,"cache_read_tokens":89,"cache_write_tokens":12}}"#;
+        let record = parse_log_line(line, &prices()).unwrap().unwrap();
+
+        assert_eq!(record.model, "mystery-model-9");
+        assert_eq!(record.input_tokens, 1234);
+        assert_eq!(record.output_tokens, 567);
+        assert_eq!(record.cache_read_tokens, 89);
+        assert_eq!(record.cache_write_tokens, 12);
+        assert_eq!(record.cost_usd, None);
+        assert_eq!(record.cost_source, CostSource::Unknown);
+        assert_eq!(record.provider, Provider::Anthropic);
+        assert_eq!(record.subscription, Subscription::Claude);
+        assert!(!record.dedup_key.is_empty());
+    }
+
+    #[test]
     fn test_parse_log_line_valid() {
         let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-5-5","usage":{"input_tokens":1234,"output_tokens":567}}"#;
         let record = parse_log_line(line, &prices()).unwrap().unwrap();
-        assert_eq!(record.model, ModelType::Sonnet);
+        assert_eq!(record.model, "claude-sonnet-5-5");
         assert_eq!(record.input_tokens, 1234);
         assert_eq!(record.output_tokens, 567);
         assert_eq!(record.source, DataSource::Log);
-        assert!(record.cost_usd > 0.0);
+        assert!(record.cost_usd.expect("priced model") > 0.0);
     }
 
     #[test]
     fn test_parse_log_line_with_cache() {
         let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-opus-5-5","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_tokens":200,"cache_write_tokens":100}}"#;
         let record = parse_log_line(line, &prices()).unwrap().unwrap();
-        assert_eq!(record.model, ModelType::Opus);
+        assert_eq!(record.model, "claude-opus-5-5");
         assert_eq!(record.cache_read_tokens, 200);
         assert_eq!(record.cache_write_tokens, 100);
     }
@@ -427,13 +454,13 @@ mod tests {
     fn test_parse_claude_code_format() {
         let line = r#"{"type":"assistant","timestamp":"2026-03-05T10:30:00Z","sessionId":"abc-123","message":{"model":"claude-opus-5-5","type":"message","role":"assistant","content":[],"usage":{"input_tokens":50,"output_tokens":200,"cache_read_input_tokens":10000,"cache_creation_input_tokens":5000}}}"#;
         let record = parse_log_line(line, &prices()).unwrap().unwrap();
-        assert_eq!(record.model, ModelType::Opus);
+        assert_eq!(record.model, "claude-opus-5-5");
         assert_eq!(record.input_tokens, 50);
         assert_eq!(record.output_tokens, 200);
         assert_eq!(record.cache_read_tokens, 10000);
         assert_eq!(record.cache_write_tokens, 5000);
         assert_eq!(record.session_id.as_deref(), Some("abc-123"));
-        assert!(record.cost_usd > 0.0);
+        assert!(record.cost_usd.expect("priced model") > 0.0);
     }
 
     #[test]
@@ -482,8 +509,8 @@ mod tests {
         let ts = DateTime::parse_from_rfc3339("2026-03-05T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let uuid1 = generate_log_uuid(ts, &ModelType::Sonnet, 1234, 567);
-        let uuid2 = generate_log_uuid(ts, &ModelType::Sonnet, 1234, 567);
+        let uuid1 = generate_log_uuid(ts, "claude-sonnet-5-5", 1234, 567);
+        let uuid2 = generate_log_uuid(ts, "claude-sonnet-5-5", 1234, 567);
         assert_eq!(uuid1, uuid2, "same inputs must produce same UUID");
     }
 
@@ -492,8 +519,8 @@ mod tests {
         let ts = DateTime::parse_from_rfc3339("2026-03-05T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let uuid1 = generate_log_uuid(ts, &ModelType::Sonnet, 1234, 567);
-        let uuid2 = generate_log_uuid(ts, &ModelType::Sonnet, 1234, 568);
+        let uuid1 = generate_log_uuid(ts, "claude-sonnet-5-5", 1234, 567);
+        let uuid2 = generate_log_uuid(ts, "claude-sonnet-5-5", 1234, 568);
         assert_ne!(
             uuid1, uuid2,
             "different inputs must produce different UUIDs"
@@ -505,8 +532,8 @@ mod tests {
         let ts = DateTime::parse_from_rfc3339("2026-03-05T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let uuid1 = generate_log_uuid(ts, &ModelType::Sonnet, 1234, 567);
-        let uuid2 = generate_log_uuid(ts, &ModelType::Opus, 1234, 567);
+        let uuid1 = generate_log_uuid(ts, "claude-sonnet-5-5", 1234, 567);
+        let uuid2 = generate_log_uuid(ts, "claude-opus-5-5", 1234, 567);
         assert_ne!(uuid1, uuid2);
     }
 
@@ -521,7 +548,7 @@ mod tests {
         let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-5-5","usage":{"input_tokens":1,"output_tokens":1}}"#;
         let record = parse_log_line(line, &prices()).unwrap().unwrap();
         // Verify cost is truncated to 6 decimal places
-        let cost_str = format!("{:.6}", record.cost_usd);
+        let cost_str = format!("{:.6}", record.cost_usd.expect("priced model"));
         let decimal_part = cost_str.split('.').nth(1).unwrap();
         assert!(decimal_part.len() <= 6);
     }

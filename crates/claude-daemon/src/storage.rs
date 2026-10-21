@@ -7,7 +7,8 @@ use claude_common::protocol::{
     UsageSummaryResponse,
 };
 use claude_common::{
-    ActiveSession, BudgetConfig, DailyAggregate, DataSource, ModelType, SessionStatus, UsageRecord,
+    ActiveSession, BudgetConfig, CostSource, DailyAggregate, DataSource, ModelType, Provider,
+    SessionStatus, Subscription, UsageRecord,
 };
 use rusqlite::{Connection, params};
 
@@ -153,7 +154,7 @@ impl Storage {
     // --- Usage Records ---
 
     pub fn insert_usage(&self, record: &UsageRecord) -> Result<(), StorageError> {
-        let model_str = record.model.to_string().to_lowercase();
+        let model_str = record.model.to_lowercase();
         let source_str = "log";
 
         self.conn
@@ -167,7 +168,9 @@ impl Storage {
                     record.output_tokens as i64,
                     record.cache_read_tokens as i64,
                     record.cache_write_tokens as i64,
-                    record.cost_usd,
+                    // The v1 schema has no nullable cost column; the v2 migration
+                    // in AC-8 adds one and stores None as NULL.
+                    record.cost_usd.unwrap_or(0.0),
                     record.session_id,
                     record.project,
                     source_str,
@@ -183,7 +186,7 @@ impl Storage {
             .transaction()
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         for record in records {
-            let model_str = record.model.to_string().to_lowercase();
+            let model_str = record.model.to_lowercase();
             let source_str = "log";
             tx.execute(
                 "INSERT OR IGNORE INTO usage_records (uuid, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, session_id, project, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -195,7 +198,8 @@ impl Storage {
                     record.output_tokens as i64,
                     record.cache_read_tokens as i64,
                     record.cache_write_tokens as i64,
-                    record.cost_usd,
+                    // As in insert_usage: the nullable column arrives in AC-8.
+                    record.cost_usd.unwrap_or(0.0),
                     record.session_id,
                     record.project,
                     source_str,
@@ -762,24 +766,24 @@ fn row_to_usage_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord>
                 )),
             )
         })?;
-    let model: ModelType = model_str.parse().map_err(|e: String| {
-        rusqlite::Error::FromSqlConversionFailure(
-            3,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-        )
-    })?;
+    let model = model_str;
 
     Ok(UsageRecord {
         id: row.get(0)?,
         uuid,
         timestamp,
         model,
+        // The v1 schema stores no provider or subscription; AC-8's v2 migration
+        // backfills those columns with the same values.
+        provider: Provider::Anthropic,
+        subscription: Subscription::Claude,
         input_tokens: row.get::<_, i64>(4)? as u64,
         output_tokens: row.get::<_, i64>(5)? as u64,
         cache_read_tokens: row.get::<_, i64>(6)? as u64,
         cache_write_tokens: row.get::<_, i64>(7)? as u64,
-        cost_usd: row.get(8)?,
+        cost_usd: Some(row.get(8)?),
+        cost_source: CostSource::Computed,
+        dedup_key: uuid_str,
         session_id: row.get(9)?,
         project: row.get(10)?,
         source: DataSource::Log,
@@ -860,16 +864,21 @@ mod tests {
         // Storage tests only need a plausible positive cost; real prices come
         // from the price config, which is covered in claude-common.
         let cost = (input + output) as f64 / 1_000.0;
+        let uuid = Uuid::new_v4();
         UsageRecord {
             id: None,
-            uuid: Uuid::new_v4(),
+            uuid,
             timestamp: Utc::now(),
-            model,
+            model: model.to_string().to_lowercase(),
+            provider: Provider::Anthropic,
+            subscription: Subscription::Claude,
             input_tokens: input,
             output_tokens: output,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            cost_usd: cost,
+            cost_usd: Some(cost),
+            cost_source: CostSource::Computed,
+            dedup_key: uuid.to_string(),
             session_id: Some("test-session".to_string()),
             project: Some("test-project".to_string()),
             source: DataSource::Log,
@@ -917,7 +926,7 @@ mod tests {
 
         assert_eq!(result.total_count, 1);
         assert_eq!(result.records.len(), 1);
-        assert_eq!(result.records[0].model, ModelType::Sonnet);
+        assert_eq!(result.records[0].model, "sonnet");
         assert_eq!(result.records[0].input_tokens, 1000);
     }
 
@@ -983,7 +992,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result.total_count, 1);
-        assert_eq!(result.records[0].model, ModelType::Sonnet);
+        assert_eq!(result.records[0].model, "sonnet");
     }
 
     #[test]

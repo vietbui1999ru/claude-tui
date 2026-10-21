@@ -191,8 +191,12 @@ pub struct UsageRecord {
     pub uuid: Uuid,
     /// When this usage event occurred.
     pub timestamp: DateTime<Utc>,
-    /// Which model was used.
-    pub model: ModelType,
+    /// Model id as the source reports it, e.g. `claude-sonnet-5-5`.
+    pub model: String,
+    /// The provider that billed these tokens.
+    pub provider: Provider,
+    /// The subscription this usage counts against.
+    pub subscription: Subscription,
     /// Number of input tokens (non-cached).
     pub input_tokens: u64,
     /// Number of output tokens.
@@ -201,13 +205,17 @@ pub struct UsageRecord {
     pub cache_read_tokens: u64,
     /// Number of cache write tokens.
     pub cache_write_tokens: u64,
-    /// Computed cost in USD.
-    pub cost_usd: f64,
+    /// Cost in USD. `None` when the model has no configured price.
+    pub cost_usd: Option<f64>,
+    /// Where the cost came from.
+    pub cost_source: CostSource,
+    /// Stable de-duplication key within the provider.
+    pub dedup_key: String,
     /// Session this request belongs to, if known.
     pub session_id: Option<String>,
     /// Project/directory context, if known.
     pub project: Option<String>,
-    /// Data source: "api" or "log".
+    /// Where the record was collected from.
     pub source: DataSource,
 }
 
