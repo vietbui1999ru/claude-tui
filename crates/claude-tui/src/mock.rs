@@ -1,7 +1,9 @@
 use chrono::Utc;
 use claude_common::{
-    ActiveSession, BudgetConfig, CollectorStatus, DailyAggregate, ModelStats, ModelType,
-    ModelsCompareResponse, PriceBook, SessionStatus, StatusResponse, UsageSummaryResponse,
+    ActiveSession, BudgetConfig, CollectorStatus, CostSource, DailyAggregate, DataSource,
+    ModelStats, ModelType, ModelsCompareResponse, PriceBook, QuotaHitStatus, QuotaWindow,
+    SessionStatus, SourceStatus, StatusResponse, Subscription, SubscriptionStatus, TokenTotals,
+    UsageSummaryResponse,
 };
 
 const DEMO_OPUS: &str = "claude-opus-5-5";
@@ -16,9 +18,124 @@ pub fn mock_status() -> StatusResponse {
         cost_today_usd: 3.47,
         budget_pct: Some(0.67),
         collector_status: CollectorStatus::Log,
-        // The per-subscription cards of the Overview tab are demo data from
-        // AC-11; the field stays part of the status contract until then.
-        subscriptions: Vec::new(),
+        subscriptions: mock_subscriptions(),
+    }
+}
+
+/// Demo cards for the Overview tab. Only shown with `--demo` (AC-11).
+pub fn mock_subscriptions() -> Vec<SubscriptionStatus> {
+    let now = Utc::now();
+    let stale_now = now - chrono::Duration::days(2);
+
+    let claude = SubscriptionStatus {
+        subscription: Subscription::Claude,
+        quota: vec![
+            QuotaWindow {
+                window: "five_hour:live".to_string(),
+                used_pct: Some(34.0),
+                resets_at: Some(now + chrono::Duration::minutes(95)),
+                source: DataSource::ClaudeQuota,
+                observed_at: now,
+                stale: false,
+                expired: false,
+            },
+            QuotaWindow {
+                window: "seven_day:live".to_string(),
+                used_pct: Some(12.0),
+                resets_at: Some(now + chrono::Duration::days(4)),
+                source: DataSource::ClaudeQuota,
+                observed_at: now,
+                stale: false,
+                expired: false,
+            },
+        ],
+        today: mock_totals(1_240_000, 310_000, 9.10, CostSource::Computed),
+        last_7d: mock_totals(8_400_000, 2_100_000, 61.40, CostSource::Computed),
+        by_tool: Vec::new(),
+        last_quota_hit: None,
+        sources: vec![
+            mock_source("claude-logs", Some(now), false),
+            mock_source("claude-quota", Some(now), false),
+        ],
+    };
+
+    let chatgpt = SubscriptionStatus {
+        subscription: Subscription::ChatGpt,
+        quota: vec![
+            QuotaWindow {
+                window: "primary".to_string(),
+                used_pct: Some(3.0),
+                resets_at: Some(now + chrono::Duration::hours(5)),
+                source: DataSource::CodexRollout,
+                observed_at: now,
+                stale: false,
+                expired: false,
+            },
+            QuotaWindow {
+                window: "secondary".to_string(),
+                used_pct: Some(8.0),
+                resets_at: Some(now + chrono::Duration::days(5)),
+                source: DataSource::CodexRollout,
+                observed_at: now,
+                stale: false,
+                expired: false,
+            },
+        ],
+        today: mock_totals(640_000, 155_000, 2.80, CostSource::Computed),
+        last_7d: mock_totals(3_900_000, 980_000, 17.60, CostSource::Computed),
+        by_tool: Vec::new(),
+        last_quota_hit: None,
+        sources: vec![
+            mock_source("codex-rollouts", Some(now), false),
+            mock_source(
+                "pi-sessions",
+                Some(now - chrono::Duration::minutes(12)),
+                false,
+            ),
+        ],
+    };
+
+    let opencode_go = SubscriptionStatus {
+        subscription: Subscription::OpencodeGo,
+        quota: Vec::new(),
+        today: mock_totals(410_000, 96_000, 3.20, CostSource::Reported),
+        last_7d: mock_totals(2_100_000, 520_000, 13.40, CostSource::Reported),
+        by_tool: Vec::new(),
+        last_quota_hit: Some(QuotaHitStatus {
+            period: Some("5h".to_string()),
+            reset_at: Some(now + chrono::Duration::hours(2)),
+            observed_at: now - chrono::Duration::minutes(40),
+        }),
+        sources: vec![
+            mock_source("pi-sessions", Some(now), false),
+            mock_source("opencode-db", Some(stale_now), true),
+        ],
+    };
+
+    vec![claude, chatgpt, opencode_go]
+}
+
+fn mock_totals(input: u64, output: u64, cost_usd: f64, cost_source: CostSource) -> TokenTotals {
+    TokenTotals {
+        input,
+        output,
+        cache_read: input / 4,
+        cache_write: input / 20,
+        reasoning: 0,
+        cost_usd: Some(cost_usd),
+        cost_source,
+    }
+}
+
+fn mock_source(
+    collector_id: &str,
+    last_update: Option<chrono::DateTime<Utc>>,
+    stale: bool,
+) -> SourceStatus {
+    SourceStatus {
+        collector_id: collector_id.to_string(),
+        last_update,
+        stale,
     }
 }
 

@@ -1,12 +1,13 @@
 use crate::client::DaemonClient;
 use crate::format::format_tokens_short;
 use crate::mock;
+use crate::overview;
 use crate::theme;
 use crate::widgets::{cost_breakdown, live_monitor, model_compare, token_chart};
 use chrono::Utc;
 use claude_common::{
-    ActiveSession, BudgetConfig, DailyAggregate, ModelsCompareResponse, SessionsListParams,
-    StatusResponse, UsageSummaryParams, UsageSummaryResponse,
+    ActiveSession, BudgetConfig, CollectorStatus, DailyAggregate, ModelsCompareResponse,
+    SessionsListParams, StatusResponse, UsageSummaryParams, UsageSummaryResponse,
 };
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
@@ -18,6 +19,7 @@ use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    Overview,
     Tokens,
     Costs,
     Models,
@@ -25,10 +27,17 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: &[Tab] = &[Tab::Tokens, Tab::Costs, Tab::Models, Tab::Live];
+    const ALL: &[Tab] = &[
+        Tab::Overview,
+        Tab::Tokens,
+        Tab::Costs,
+        Tab::Models,
+        Tab::Live,
+    ];
 
     fn title(&self) -> &'static str {
         match self {
+            Tab::Overview => "Overview",
             Tab::Tokens => "Tokens",
             Tab::Costs => "Costs",
             Tab::Models => "Models",
@@ -38,10 +47,11 @@ impl Tab {
 
     fn index(&self) -> usize {
         match self {
-            Tab::Tokens => 0,
-            Tab::Costs => 1,
-            Tab::Models => 2,
-            Tab::Live => 3,
+            Tab::Overview => 0,
+            Tab::Tokens => 1,
+            Tab::Costs => 2,
+            Tab::Models => 3,
+            Tab::Live => 4,
         }
     }
 
@@ -54,10 +64,13 @@ impl Tab {
 enum ConnectionStatus {
     Connected,
     Disconnected,
+    Demo,
 }
 
 pub struct App {
-    client: Option<DaemonClient>,
+    client: DaemonClient,
+    /// Mock data is only ever shown with `--demo` (AC-11).
+    demo: bool,
     current_tab: Tab,
     should_quit: bool,
     connection_status: ConnectionStatus,
@@ -80,24 +93,25 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(client: Option<DaemonClient>) -> Self {
-        let connected = client.is_some();
+    /// Build the app.
+    ///
+    /// Without `demo`, every field starts empty and only daemon data fills it:
+    /// a down daemon leaves the app with nothing to show, never with mock
+    /// numbers.
+    pub async fn new(client: DaemonClient, demo: bool) -> Self {
         let mut app = Self {
             client,
-            current_tab: Tab::Tokens,
+            demo,
+            current_tab: Tab::Overview,
             should_quit: false,
-            connection_status: if connected {
-                ConnectionStatus::Connected
-            } else {
-                ConnectionStatus::Disconnected
-            },
-            status: mock::mock_status(),
-            budget: mock::mock_budget(),
-            daily_aggregates: mock::mock_daily_aggregates(),
-            usage_summary: mock::mock_usage_summary(),
-            sessions: mock::mock_sessions(),
-            model_stats: mock::mock_model_stats(),
-            project_costs: mock::mock_project_costs(),
+            connection_status: ConnectionStatus::Disconnected,
+            status: empty_status(),
+            budget: BudgetConfig::default(),
+            daily_aggregates: Vec::new(),
+            usage_summary: empty_summary(),
+            sessions: Vec::new(),
+            model_stats: ModelsCompareResponse { models: Vec::new() },
+            project_costs: Vec::new(),
             time_range: token_chart::TimeRangeSelection::SevenDays,
             project_scroll: 0,
             session_selected: 0,
@@ -105,11 +119,7 @@ impl App {
             last_data_refresh: Instant::now(),
         };
 
-        // If connected, try fetching real data
-        if connected {
-            app.refresh_data_from_daemon().await;
-        }
-
+        app.refresh_data().await;
         app
     }
 
@@ -137,7 +147,7 @@ impl App {
 
             // Periodic data refresh
             if self.last_data_refresh.elapsed() >= data_refresh_interval {
-                self.refresh_data_from_daemon().await;
+                self.refresh_data().await;
             }
 
             if self.should_quit {
@@ -150,7 +160,7 @@ impl App {
         match key {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('r') => {
-                self.refresh_data_from_daemon().await;
+                self.refresh_data().await;
             }
             KeyCode::Left => {
                 let idx = self.current_tab.index();
@@ -199,21 +209,26 @@ impl App {
         }
     }
 
-    async fn refresh_data_from_daemon(&mut self) {
+    /// Pull daemon data, or mock data in demo mode.
+    ///
+    /// A failure never substitutes mock data (AC-11): it sets the disconnected
+    /// state, which the UI renders as the unreachable panel, and the next tick
+    /// retries the connection.
+    async fn refresh_data(&mut self) {
         self.last_data_refresh = Instant::now();
 
-        let client = match self.client.as_ref() {
-            Some(c) if c.is_connected() => c,
-            _ => {
-                // No client or not connected — use mock data
-                self.connection_status = ConnectionStatus::Disconnected;
-                self.refresh_mock_data();
-                return;
-            }
-        };
+        if self.demo {
+            self.connection_status = ConnectionStatus::Demo;
+            self.refresh_mock_data();
+            return;
+        }
 
-        // Try fetching real data; fall back to mock on any failure
-        match client.status().await {
+        if !self.client.is_connected() && !self.client.reconnect().await {
+            self.connection_status = ConnectionStatus::Disconnected;
+            return;
+        }
+
+        match self.client.status().await {
             Ok(status) => {
                 self.status = status;
                 self.connection_status = ConnectionStatus::Connected;
@@ -221,12 +236,11 @@ impl App {
             Err(e) => {
                 warn!("Failed to fetch status from daemon: {e}");
                 self.connection_status = ConnectionStatus::Disconnected;
-                self.refresh_mock_data();
                 return;
             }
         }
 
-        if let Ok(budget) = client.get_budget().await {
+        if let Ok(budget) = self.client.get_budget().await {
             self.budget = budget;
         }
 
@@ -235,7 +249,7 @@ impl App {
             window: claude_common::TimeWindow::Day,
             model: None,
         };
-        if let Ok(summary) = client.get_summary(summary_params).await {
+        if let Ok(summary) = self.client.get_summary(summary_params).await {
             self.daily_aggregates = summary.aggregates.clone();
             self.usage_summary = summary;
         }
@@ -245,16 +259,17 @@ impl App {
             limit: 50,
             offset: 0,
         };
-        if let Ok(sessions_resp) = client.list_sessions(session_params).await {
+        if let Ok(sessions_resp) = self.client.list_sessions(session_params).await {
             self.sessions = sessions_resp.sessions;
         }
 
         let compare_params = claude_common::ModelsCompareParams { time_range: None };
-        if let Ok(model_stats) = client.compare_models(compare_params).await {
+        if let Ok(model_stats) = self.client.compare_models(compare_params).await {
             self.model_stats = model_stats;
         }
 
-        // Project costs are not yet available from daemon — keep mock
+        // Project costs have no daemon source yet: the Costs tab shows the empty
+        // section rather than demo numbers.
     }
 
     fn refresh_mock_data(&mut self) {
@@ -301,6 +316,7 @@ impl App {
         let (status_text, status_color) = match self.connection_status {
             ConnectionStatus::Connected => ("[Connected]", theme::COLOR_SUCCESS),
             ConnectionStatus::Disconnected => ("[Disconnected]", theme::COLOR_ERROR),
+            ConnectionStatus::Demo => ("[Demo]", theme::COLOR_WARNING),
         };
 
         let left = Span::styled(
@@ -339,7 +355,14 @@ impl App {
     }
 
     fn render_content(&self, frame: &mut Frame, area: Rect) {
-        let hide_sidebar = area.width < 100;
+        if self.connection_status == ConnectionStatus::Disconnected {
+            self.render_daemon_unreachable(frame, area);
+            return;
+        }
+
+        // The Overview cards need the full width; the sidebar duplicates
+        // numbers for the other tabs.
+        let hide_sidebar = area.width < 100 || self.current_tab == Tab::Overview;
 
         if hide_sidebar {
             // Full width content only
@@ -370,6 +393,9 @@ impl App {
 
     fn render_tab_content(&self, frame: &mut Frame, area: Rect) {
         match self.current_tab {
+            Tab::Overview => {
+                overview::render_overview(frame, area, &self.status, Utc::now());
+            }
             Tab::Tokens => {
                 token_chart::render_token_chart(
                     frame,
@@ -566,6 +592,29 @@ impl App {
         }
     }
 
+    fn render_daemon_unreachable(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .title(" Daemon ")
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(theme::COLOR_ERROR));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let message = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "daemon unreachable — start `claude-daemon`",
+                Style::new().fg(theme::COLOR_ERROR).bold(),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "retrying on every refresh tick · press r to retry now · q to quit",
+                Style::new().fg(theme::COLOR_TEXT_DIM),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(message).alignment(Alignment::Center), inner);
+    }
+
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let hints = Line::from(vec![
             Span::styled(" q", Style::new().bold()),
@@ -614,4 +663,123 @@ fn compute_today_model_pcts(aggregates: &[DailyAggregate]) -> Vec<(String, u32)>
 
     model_pcts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     model_pcts
+}
+
+/// The no-data status, used before the first daemon answer and after the daemon
+/// goes away. Deliberately empty: it holds no numbers a person could mistake for
+/// real usage.
+fn empty_status() -> StatusResponse {
+    StatusResponse {
+        daemon_uptime_secs: 0,
+        active_sessions: 0,
+        current_model: None,
+        cost_today_usd: 0.0,
+        budget_pct: None,
+        collector_status: CollectorStatus::Offline,
+        subscriptions: Vec::new(),
+    }
+}
+
+fn empty_summary() -> UsageSummaryResponse {
+    UsageSummaryResponse {
+        aggregates: Vec::new(),
+        total_cost_usd: 0.0,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_requests: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::path::PathBuf;
+
+    /// A socket path that cannot exist, so every connect attempt fails.
+    fn absent_socket() -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("claude-tui-app-{}", std::process::id()))
+            .join("absent.sock")
+    }
+
+    fn disconnected_client() -> DaemonClient {
+        DaemonClient::disconnected(&absent_socket())
+    }
+
+    fn buffer_text(app: &mut App) -> String {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("test render");
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area().height {
+            for x in 0..buffer.area().width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[tokio::test]
+    async fn no_mock_without_demo() {
+        let mut app = App::new(disconnected_client(), false).await;
+        app.refresh_data().await;
+
+        assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
+        assert_eq!(app.current_tab, Tab::Overview);
+
+        // No field holds a mock value: every one is empty or neutral.
+        let mock_status = mock::mock_status();
+        assert!(app.status.subscriptions.is_empty());
+        assert_ne!(app.status.cost_today_usd, mock_status.cost_today_usd);
+        assert_eq!(app.status.cost_today_usd, 0.0);
+        assert_eq!(app.status.active_sessions, 0);
+        assert!(matches!(
+            app.status.collector_status,
+            CollectorStatus::Offline
+        ));
+
+        assert!(app.daily_aggregates.is_empty());
+        assert!(app.sessions.is_empty());
+        assert!(app.model_stats.models.is_empty());
+        assert!(app.project_costs.is_empty());
+        assert_eq!(app.usage_summary.total_cost_usd, 0.0);
+
+        let mock_budget = mock::mock_budget();
+        assert_ne!(app.budget.daily_limit_usd, mock_budget.daily_limit_usd);
+        assert_eq!(app.budget.daily_limit_usd, None);
+        assert_eq!(app.budget.monthly_limit_usd, None);
+    }
+
+    #[tokio::test]
+    async fn no_mock_without_demo_renders_the_unreachable_panel() {
+        let mut app = App::new(disconnected_client(), false).await;
+        app.refresh_data().await;
+
+        let text = buffer_text(&mut app);
+        assert!(text.contains("daemon unreachable — start `claude-daemon`"));
+        assert!(!text.contains("claude-opus-5-5"));
+        assert!(!text.contains("opencode-go"));
+    }
+
+    #[tokio::test]
+    async fn no_mock_without_demo_demo_mode_still_uses_mock_data() {
+        let mut app = App::new(disconnected_client(), true).await;
+        app.refresh_data().await;
+
+        assert_eq!(app.connection_status, ConnectionStatus::Demo);
+        assert_eq!(app.status.subscriptions.len(), 3);
+        assert_eq!(
+            app.status.cost_today_usd,
+            mock::mock_status().cost_today_usd
+        );
+
+        let text = buffer_text(&mut app);
+        assert!(text.contains("opencode-go"), "{text}");
+        assert!(!text.contains("daemon unreachable"));
+    }
 }

@@ -2,8 +2,10 @@ mod app;
 mod client;
 pub mod format;
 mod mock;
+mod overview;
 mod theme;
 mod widgets;
+mod windows;
 
 use app::App;
 use client::DaemonClient;
@@ -25,12 +27,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         original_hook(panic_info);
     }));
 
-    // Try connecting to daemon first (before terminal setup)
+    // The client always exists so the app can retry a dead daemon with
+    // `reconnect` on every refresh tick.
     let socket = claude_common::socket_path();
-    let client = DaemonClient::connect(&socket).await;
-    if client.is_none() {
-        eprintln!("Daemon not running — starting in mock mode");
-    }
+    let client = DaemonClient::disconnected(&socket);
+    client.reconnect().await;
 
     // Setup terminal
     enable_raw_mode()?;
@@ -40,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run the app
-    let mut app = App::new(client).await;
+    let mut app = App::new(client, false).await;
     let result = app.run(&mut terminal).await;
 
     // Restore terminal

@@ -20,25 +20,27 @@ pub struct DaemonClient {
 }
 
 impl DaemonClient {
-    pub async fn connect(socket_path: &Path) -> Option<Self> {
-        let path_str = socket_path.to_string_lossy().to_string();
-        let stream = UnixStream::connect(socket_path).await.ok()?;
-        Some(Self {
-            stream: Mutex::new(Some(BufReader::new(stream))),
+    /// A client with no stream, remembering where to connect.
+    ///
+    /// The TUI keeps one of these when the daemon was down at startup, so it can
+    /// retry with [`Self::reconnect`] on every refresh tick (AC-11).
+    pub fn disconnected(socket_path: &Path) -> Self {
+        Self {
+            stream: Mutex::new(None),
             next_id: AtomicU64::new(1),
-            socket_path: path_str,
-        })
+            socket_path: socket_path.to_string_lossy().to_string(),
+        }
     }
 
-    #[allow(dead_code)]
     pub async fn reconnect(&self) -> bool {
         let path = Path::new(&self.socket_path);
-        if let Ok(stream) = UnixStream::connect(path).await {
-            let mut guard = self.stream.lock().await;
-            *guard = Some(BufReader::new(stream));
-            true
-        } else {
-            false
+        match UnixStream::connect(path).await {
+            Ok(stream) => {
+                let mut guard = self.stream.lock().await;
+                *guard = Some(BufReader::new(stream));
+                true
+            }
+            Err(_) => false,
         }
     }
 
