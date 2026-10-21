@@ -283,6 +283,7 @@ pub struct CollectorConfig {
     pub claude_roots: Vec<std::path::PathBuf>,
     pub codex_roots: Vec<std::path::PathBuf>,
     pub pi_roots: Vec<std::path::PathBuf>,
+    pub opencode_db: std::path::PathBuf,
 }
 
 impl Default for CollectorConfig {
@@ -292,7 +293,19 @@ impl Default for CollectorConfig {
             claude_roots: default_claude_roots(),
             codex_roots: default_codex_roots(),
             pi_roots: default_pi_roots(),
+            opencode_db: default_opencode_db(),
         }
+    }
+}
+
+fn default_opencode_db() -> std::path::PathBuf {
+    match std::env::var("HOME") {
+        Ok(home) => std::path::PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("opencode.db"),
+        Err(_) => std::path::PathBuf::new(),
     }
 }
 
@@ -349,7 +362,13 @@ pub fn default_collectors(
             config.codex_roots.clone(),
             prices.clone(),
         )),
-        Box::new(pi::PiSessionCollector::new(config.pi_roots.clone(), prices)),
+        Box::new(pi::PiSessionCollector::new(
+            config.pi_roots.clone(),
+            prices.clone(),
+        )),
+        Box::new(opencode::OpencodeDbCollector::new(
+            config.opencode_db.clone(),
+        )),
     ]
 }
 
