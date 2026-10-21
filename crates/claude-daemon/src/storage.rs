@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, NaiveDate, Utc};
+// The status types below are the AC-9 aggregates: see `StatusAggregates`,
+// `window_totals`, `tool_breakdown`, `source_updates` and `status_for`.
 use claude_common::protocol::{
     ModelStats, ModelsCompareParams, ModelsCompareResponse, QuotaHitStatus, QuotaWindow,
     SessionsListParams, SessionsListResponse, SourceStatus, SubscriptionStatus, TokenTotals,

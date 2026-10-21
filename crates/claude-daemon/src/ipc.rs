@@ -190,7 +190,8 @@ async fn handle_request(
                 .map(|limit| if limit > 0.0 { cost_today / limit } else { 0.0 });
 
             // Per-subscription usage, quota and freshness (AC-9). A failed
-            // aggregate leaves the list empty rather than failing `status`.
+            // aggregate leaves the list empty rather than failing `status`, so
+            // an older client keeps its fields and ignores this one.
             let subscriptions = match storage.subscription_statuses(chrono::Utc::now()) {
                 Ok(subscriptions) => subscriptions,
                 Err(e) => {
