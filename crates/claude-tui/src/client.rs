@@ -17,9 +17,28 @@ pub struct DaemonClient {
     stream: Mutex<Option<BufReader<UnixStream>>>,
     next_id: AtomicU64,
     socket_path: String,
+    read_timeout: Duration,
 }
 
 impl DaemonClient {
+    /// Connect with an explicit connect and read timeout.
+    ///
+    /// `claude-tui status` uses a 2s budget so a dead daemon cannot stall a
+    /// sketchybar refresh (AC-10).
+    pub async fn connect_with_timeout(socket_path: &Path, limit: Duration) -> Option<Self> {
+        let path_str = socket_path.to_string_lossy().to_string();
+        let stream = timeout(limit, UnixStream::connect(socket_path))
+            .await
+            .ok()?
+            .ok()?;
+        Some(Self {
+            stream: Mutex::new(Some(BufReader::new(stream))),
+            next_id: AtomicU64::new(1),
+            socket_path: path_str,
+            read_timeout: limit,
+        })
+    }
+
     /// A client with no stream, remembering where to connect.
     ///
     /// The TUI keeps one of these when the daemon was down at startup, so it can
@@ -29,18 +48,19 @@ impl DaemonClient {
             stream: Mutex::new(None),
             next_id: AtomicU64::new(1),
             socket_path: socket_path.to_string_lossy().to_string(),
+            read_timeout: Duration::from_secs(READ_TIMEOUT_SECS),
         }
     }
 
     pub async fn reconnect(&self) -> bool {
         let path = Path::new(&self.socket_path);
-        match UnixStream::connect(path).await {
-            Ok(stream) => {
+        match timeout(self.read_timeout, UnixStream::connect(path)).await {
+            Ok(Ok(stream)) => {
                 let mut guard = self.stream.lock().await;
                 *guard = Some(BufReader::new(stream));
                 true
             }
-            Err(_) => false,
+            _ => false,
         }
     }
 
@@ -79,12 +99,7 @@ impl DaemonClient {
             .map_err(|e| IpcError::Connection(e.to_string()))?;
 
         let mut line = String::new();
-        match timeout(
-            Duration::from_secs(READ_TIMEOUT_SECS),
-            stream.read_line(&mut line),
-        )
-        .await
-        {
+        match timeout(self.read_timeout, stream.read_line(&mut line)).await {
             Ok(Ok(0)) => {
                 // Connection closed
                 *guard = None;
@@ -94,7 +109,7 @@ impl DaemonClient {
             Ok(Err(e)) => return Err(IpcError::Connection(e.to_string())),
             Err(_) => {
                 return Err(IpcError::Timeout {
-                    timeout_ms: READ_TIMEOUT_SECS * 1000,
+                    timeout_ms: self.read_timeout.as_millis() as u64,
                 });
             }
         }
