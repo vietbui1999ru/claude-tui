@@ -12,57 +12,6 @@ pub enum ModelType {
 }
 
 impl ModelType {
-    /// Price per million input tokens in USD.
-    pub fn input_price_per_m(&self) -> f64 {
-        match self {
-            ModelType::Opus => 15.0,
-            ModelType::Sonnet => 3.0,
-            ModelType::Haiku => 0.80,
-        }
-    }
-
-    /// Price per million output tokens in USD.
-    pub fn output_price_per_m(&self) -> f64 {
-        match self {
-            ModelType::Opus => 75.0,
-            ModelType::Sonnet => 15.0,
-            ModelType::Haiku => 4.0,
-        }
-    }
-
-    /// Price per million cache read tokens in USD.
-    pub fn cache_read_price_per_m(&self) -> f64 {
-        match self {
-            ModelType::Opus => 1.50,
-            ModelType::Sonnet => 0.30,
-            ModelType::Haiku => 0.08,
-        }
-    }
-
-    /// Price per million cache write tokens in USD.
-    pub fn cache_write_price_per_m(&self) -> f64 {
-        match self {
-            ModelType::Opus => 18.75,
-            ModelType::Sonnet => 3.75,
-            ModelType::Haiku => 1.0,
-        }
-    }
-
-    /// Compute cost for a given token breakdown.
-    pub fn compute_cost(
-        &self,
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_tokens: u64,
-        cache_write_tokens: u64,
-    ) -> f64 {
-        let input = input_tokens as f64 * self.input_price_per_m() / 1_000_000.0;
-        let output = output_tokens as f64 * self.output_price_per_m() / 1_000_000.0;
-        let cache_read = cache_read_tokens as f64 * self.cache_read_price_per_m() / 1_000_000.0;
-        let cache_write = cache_write_tokens as f64 * self.cache_write_price_per_m() / 1_000_000.0;
-        input + output + cache_read + cache_write
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             ModelType::Opus => "Opus",
@@ -135,6 +84,7 @@ pub enum DataSource {
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
     Anthropic,
+    #[serde(rename = "openai-codex")]
     OpenAiCodex,
     OpencodeGo,
     /// Any provider this dashboard does not know about.
@@ -202,6 +152,34 @@ pub fn subscription_for(source: DataSource, provider: Provider) -> Subscription 
             Provider::Anthropic | Provider::Other => Subscription::Other,
         },
         DataSource::OpencodeDb => Subscription::OpencodeGo,
+    }
+}
+
+/// Where a record's cost came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CostSource {
+    /// The provider reported the cost (Pi `cost.total`, OpenCode message `cost`).
+    Reported,
+    /// The cost was computed from configured prices and token counts.
+    Computed,
+    /// No price is configured for the model, so the cost is unknown.
+    Unknown,
+}
+
+impl CostSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CostSource::Reported => "reported",
+            CostSource::Computed => "computed",
+            CostSource::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for CostSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -303,52 +281,6 @@ pub enum TimeWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_compute_cost_opus() {
-        let cost = ModelType::Opus.compute_cost(1_000_000, 500_000, 200_000, 100_000);
-        // input: 1M * 15/1M = 15.0
-        // output: 500K * 75/1M = 37.5
-        // cache_read: 200K * 1.5/1M = 0.3
-        // cache_write: 100K * 18.75/1M = 1.875
-        let expected = 15.0 + 37.5 + 0.3 + 1.875;
-        assert!(
-            (cost - expected).abs() < 1e-10,
-            "got {cost}, expected {expected}"
-        );
-    }
-
-    #[test]
-    fn test_compute_cost_sonnet() {
-        let cost = ModelType::Sonnet.compute_cost(1_000_000, 1_000_000, 0, 0);
-        // input: 1M * 3/1M = 3.0
-        // output: 1M * 15/1M = 15.0
-        let expected = 18.0;
-        assert!(
-            (cost - expected).abs() < 1e-10,
-            "got {cost}, expected {expected}"
-        );
-    }
-
-    #[test]
-    fn test_compute_cost_haiku() {
-        let cost = ModelType::Haiku.compute_cost(500_000, 250_000, 100_000, 50_000);
-        // input: 500K * 0.8/1M = 0.4
-        // output: 250K * 4.0/1M = 1.0
-        // cache_read: 100K * 0.08/1M = 0.008
-        // cache_write: 50K * 1.0/1M = 0.05
-        let expected = 0.4 + 1.0 + 0.008 + 0.05;
-        assert!(
-            (cost - expected).abs() < 1e-10,
-            "got {cost}, expected {expected}"
-        );
-    }
-
-    #[test]
-    fn test_compute_cost_zero() {
-        let cost = ModelType::Sonnet.compute_cost(0, 0, 0, 0);
-        assert!((cost - 0.0).abs() < 1e-10);
-    }
 
     #[test]
     fn test_from_str_full_model_ids() {
@@ -487,5 +419,35 @@ mod tests {
         let json = serde_json::to_string(&Subscription::OpencodeGo).unwrap();
         assert_eq!(json, r#""opencode-go""#);
         assert_eq!(Provider::OpenAiCodex.to_string(), "openai-codex");
+    }
+
+    #[test]
+    fn test_provider_serde_matches_as_str() {
+        for provider in [
+            Provider::Anthropic,
+            Provider::OpenAiCodex,
+            Provider::OpencodeGo,
+            Provider::Other,
+        ] {
+            let json = serde_json::to_string(&provider).unwrap();
+            assert_eq!(json, format!("\"{}\"", provider.as_str()));
+            let parsed: Provider = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, provider);
+        }
+    }
+
+    #[test]
+    fn test_cost_source_serde_roundtrip() {
+        for (source, name) in [
+            (CostSource::Reported, "reported"),
+            (CostSource::Computed, "computed"),
+            (CostSource::Unknown, "unknown"),
+        ] {
+            let json = serde_json::to_string(&source).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            let parsed: CostSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, source);
+            assert_eq!(source.to_string(), name);
+        }
     }
 }

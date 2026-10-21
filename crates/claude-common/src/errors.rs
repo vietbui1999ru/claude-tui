@@ -18,6 +18,16 @@ pub enum AppError {
     Config(String),
 }
 
+/// Errors from loading the config file (prices, collector paths).
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("failed to read config at {path}: {reason}")]
+    Read { path: String, reason: String },
+
+    #[error("failed to parse config at {path}: {reason}")]
+    Parse { path: String, reason: String },
+}
+
 /// Errors from the data collector subsystem.
 #[derive(Debug, Error)]
 pub enum CollectorError {

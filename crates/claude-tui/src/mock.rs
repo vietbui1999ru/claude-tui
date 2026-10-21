@@ -1,8 +1,17 @@
 use chrono::Utc;
 use claude_common::{
     ActiveSession, BudgetConfig, CollectorStatus, DailyAggregate, ModelStats, ModelType,
-    ModelsCompareResponse, SessionStatus, StatusResponse, UsageSummaryResponse,
+    ModelsCompareResponse, PriceBook, SessionStatus, StatusResponse, UsageSummaryResponse,
 };
+
+/// Demo model ids used to price the mock data from the embedded default prices.
+fn demo_model_id(model: ModelType) -> &'static str {
+    match model {
+        ModelType::Opus => "claude-opus-5-5",
+        ModelType::Sonnet => "claude-sonnet-5-5",
+        ModelType::Haiku => "claude-haiku-5-5",
+    }
+}
 
 pub fn mock_status() -> StatusResponse {
     StatusResponse {
@@ -46,9 +55,13 @@ pub fn mock_daily_aggregates() -> Vec<DailyAggregate> {
         (0, ModelType::Haiku, 20_000, 8_000, 6_000, 1_500),
     ];
 
+    let price_book = PriceBook::embedded().unwrap_or_default();
+
     for (offset, model, input, output, cache_r, cache_w) in data {
         let date = today + chrono::Duration::days(offset);
-        let cost = model.compute_cost(input, output, cache_r, cache_w);
+        let cost = price_book
+            .cost(demo_model_id(model), input, output, cache_r, cache_w)
+            .unwrap_or(0.0);
         aggs.push(DailyAggregate {
             date,
             model,

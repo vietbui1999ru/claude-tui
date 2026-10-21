@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use claude_common::protocol::CollectorStatus;
-use claude_common::{CollectorError, DataSource, ModelType, UsageRecord};
+use claude_common::{CollectorError, DataSource, ModelType, PriceBook, UsageRecord};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -51,6 +51,7 @@ pub struct Collector {
     storage: Arc<Mutex<Storage>>,
     collector_status: Arc<Mutex<CollectorStatus>>,
     cancel: CancellationToken,
+    prices: PriceBook,
 }
 
 impl Collector {
@@ -65,6 +66,7 @@ impl Collector {
             storage,
             collector_status,
             cancel,
+            prices: load_prices(),
         }
     }
 
@@ -101,7 +103,7 @@ impl Collector {
             let mut any_new = false;
             for path in &self.config.log_paths {
                 if path.exists() {
-                    match scan_log_directory(path, &mut file_cursors) {
+                    match scan_log_directory(path, &mut file_cursors, &self.prices) {
                         Ok(records) => {
                             if !records.is_empty() {
                                 any_new = true;
@@ -130,20 +132,34 @@ impl Collector {
     }
 }
 
+/// Load the user's price config, falling back to the built-in default prices
+/// when the file cannot be read or parsed.
+fn load_prices() -> PriceBook {
+    match PriceBook::load() {
+        Ok(prices) => prices,
+        Err(e) => {
+            warn!("failed to load price config ({e}); using built-in default prices");
+            PriceBook::embedded().unwrap_or_default()
+        }
+    }
+}
+
 /// Scan a directory recursively for JSONL/log files and parse usage records.
 /// Uses `file_cursors` to track per-file byte offsets so only new data is read.
 fn scan_log_directory(
     dir: &std::path::Path,
     file_cursors: &mut HashMap<PathBuf, u64>,
+    prices: &PriceBook,
 ) -> Result<Vec<UsageRecord>, CollectorError> {
     let mut records = Vec::new();
-    scan_log_directory_recursive(dir, file_cursors, &mut records)?;
+    scan_log_directory_recursive(dir, file_cursors, prices, &mut records)?;
     Ok(records)
 }
 
 fn scan_log_directory_recursive(
     dir: &std::path::Path,
     file_cursors: &mut HashMap<PathBuf, u64>,
+    prices: &PriceBook,
     records: &mut Vec<UsageRecord>,
 ) -> Result<(), CollectorError> {
     let entries = std::fs::read_dir(dir).map_err(|e| CollectorError::LogWatch(e.to_string()))?;
@@ -154,7 +170,7 @@ fn scan_log_directory_recursive(
 
         if path.is_dir() {
             // Recurse into subdirectories (projects, subagents, etc.)
-            if let Err(e) = scan_log_directory_recursive(&path, file_cursors, records) {
+            if let Err(e) = scan_log_directory_recursive(&path, file_cursors, prices, records) {
                 warn!("error scanning {}: {e}", path.display());
             }
             continue;
@@ -162,7 +178,7 @@ fn scan_log_directory_recursive(
 
         let ext = path.extension().and_then(|e| e.to_str());
         if ext == Some("jsonl") || ext == Some("log") {
-            if let Err(e) = read_new_lines(&path, file_cursors, records) {
+            if let Err(e) = read_new_lines(&path, file_cursors, prices, records) {
                 warn!("error reading {}: {e}", path.display());
             }
         }
@@ -175,6 +191,7 @@ fn scan_log_directory_recursive(
 fn read_new_lines(
     path: &std::path::Path,
     file_cursors: &mut HashMap<PathBuf, u64>,
+    prices: &PriceBook,
     records: &mut Vec<UsageRecord>,
 ) -> Result<(), CollectorError> {
     let file = std::fs::File::open(path).map_err(|e| CollectorError::LogWatch(e.to_string()))?;
@@ -209,7 +226,7 @@ fn read_new_lines(
         if bytes_read == 0 {
             break;
         }
-        match parse_log_line(&line) {
+        match parse_log_line(&line, prices) {
             Ok(Some(record)) => records.push(record),
             Ok(None) => {}
             Err(e) => {
@@ -229,7 +246,7 @@ fn read_new_lines(
 /// Supports two formats:
 /// 1. **Claude Code conversation format**: `{type: "assistant", timestamp, sessionId, message: {model, usage: {...}}}`
 /// 2. **Generic log format**: `{timestamp, model, usage: {...}}`
-fn parse_log_line(line: &str) -> Result<Option<UsageRecord>, CollectorError> {
+fn parse_log_line(line: &str, prices: &PriceBook) -> Result<Option<UsageRecord>, CollectorError> {
     let line = line.trim();
     if line.is_empty() {
         return Ok(None);
@@ -311,14 +328,18 @@ fn parse_log_line(line: &str) -> Result<Option<UsageRecord>, CollectorError> {
         return Ok(None);
     }
 
-    let cost_usd = model.compute_cost(
-        input_tokens,
-        output_tokens,
-        cache_read_tokens,
-        cache_write_tokens,
-    );
-    // Truncate to 6 decimal places
-    let cost_usd = (cost_usd * 1_000_000.0).round() / 1_000_000.0;
+    // Truncate to 6 decimal places. Until AC-6 makes the field optional, an
+    // unconfigured model's cost is recorded as zero.
+    let cost_usd = prices
+        .cost(
+            model_str,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        )
+        .map(|cost| (cost * 1_000_000.0).round() / 1_000_000.0)
+        .unwrap_or(0.0);
 
     let uuid = generate_log_uuid(timestamp, &model, input_tokens, output_tokens);
 
@@ -377,10 +398,15 @@ fn generate_log_uuid(
 mod tests {
     use super::*;
 
+    /// Embedded default prices: tests must never read the real home config.
+    fn prices() -> PriceBook {
+        PriceBook::embedded().expect("embedded default prices must parse")
+    }
+
     #[test]
     fn test_parse_log_line_valid() {
-        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-4-6","usage":{"input_tokens":1234,"output_tokens":567}}"#;
-        let record = parse_log_line(line).unwrap().unwrap();
+        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-5-5","usage":{"input_tokens":1234,"output_tokens":567}}"#;
+        let record = parse_log_line(line, &prices()).unwrap().unwrap();
         assert_eq!(record.model, ModelType::Sonnet);
         assert_eq!(record.input_tokens, 1234);
         assert_eq!(record.output_tokens, 567);
@@ -390,8 +416,8 @@ mod tests {
 
     #[test]
     fn test_parse_log_line_with_cache() {
-        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-opus-4-6","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_tokens":200,"cache_write_tokens":100}}"#;
-        let record = parse_log_line(line).unwrap().unwrap();
+        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-opus-5-5","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_tokens":200,"cache_write_tokens":100}}"#;
+        let record = parse_log_line(line, &prices()).unwrap().unwrap();
         assert_eq!(record.model, ModelType::Opus);
         assert_eq!(record.cache_read_tokens, 200);
         assert_eq!(record.cache_write_tokens, 100);
@@ -399,8 +425,8 @@ mod tests {
 
     #[test]
     fn test_parse_claude_code_format() {
-        let line = r#"{"type":"assistant","timestamp":"2026-03-05T10:30:00Z","sessionId":"abc-123","message":{"model":"claude-opus-4-6","type":"message","role":"assistant","content":[],"usage":{"input_tokens":50,"output_tokens":200,"cache_read_input_tokens":10000,"cache_creation_input_tokens":5000}}}"#;
-        let record = parse_log_line(line).unwrap().unwrap();
+        let line = r#"{"type":"assistant","timestamp":"2026-03-05T10:30:00Z","sessionId":"abc-123","message":{"model":"claude-opus-5-5","type":"message","role":"assistant","content":[],"usage":{"input_tokens":50,"output_tokens":200,"cache_read_input_tokens":10000,"cache_creation_input_tokens":5000}}}"#;
+        let record = parse_log_line(line, &prices()).unwrap().unwrap();
         assert_eq!(record.model, ModelType::Opus);
         assert_eq!(record.input_tokens, 50);
         assert_eq!(record.output_tokens, 200);
@@ -414,40 +440,40 @@ mod tests {
     fn test_parse_claude_code_non_assistant_skipped() {
         // "user" type messages don't have usage data
         let line = r#"{"type":"user","timestamp":"2026-03-05T10:30:00Z","sessionId":"abc-123","message":{"role":"user","content":"hello"}}"#;
-        let result = parse_log_line(line).unwrap();
+        let result = parse_log_line(line, &prices()).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_parse_log_line_zero_tokens_rejected() {
-        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-4-6","usage":{"input_tokens":0,"output_tokens":0}}"#;
-        let result = parse_log_line(line).unwrap();
+        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-5-5","usage":{"input_tokens":0,"output_tokens":0}}"#;
+        let result = parse_log_line(line, &prices()).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_parse_log_line_missing_usage() {
-        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-4-6"}"#;
-        let result = parse_log_line(line).unwrap();
+        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-5-5"}"#;
+        let result = parse_log_line(line, &prices()).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_parse_log_line_empty() {
-        let result = parse_log_line("").unwrap();
+        let result = parse_log_line("", &prices()).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_parse_log_line_invalid_json() {
-        let result = parse_log_line("not json");
+        let result = parse_log_line("not json", &prices());
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_log_line_unknown_fields_ignored() {
-        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":50},"extra_field":"ignored"}"#;
-        let record = parse_log_line(line).unwrap().unwrap();
+        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-5-5","usage":{"input_tokens":100,"output_tokens":50},"extra_field":"ignored"}"#;
+        let record = parse_log_line(line, &prices()).unwrap().unwrap();
         assert_eq!(record.input_tokens, 100);
     }
 
@@ -492,8 +518,8 @@ mod tests {
 
     #[test]
     fn test_normalization_cost_truncation() {
-        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1}}"#;
-        let record = parse_log_line(line).unwrap().unwrap();
+        let line = r#"{"timestamp":"2026-03-05T10:30:00Z","model":"claude-sonnet-5-5","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let record = parse_log_line(line, &prices()).unwrap().unwrap();
         // Verify cost is truncated to 6 decimal places
         let cost_str = format!("{:.6}", record.cost_usd);
         let decimal_part = cost_str.split('.').nth(1).unwrap();

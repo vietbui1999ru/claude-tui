@@ -1,0 +1,130 @@
+# Default model prices for claude-tui, in USD per million tokens.
+#
+# These are fallbacks. A `[prices]` table in
+# ~/.config/claude-daemon/config.toml replaces this whole table instead of
+# merging with it. Keys are model-id substrings, matched case-insensitively;
+# when several keys match a model, the longest key wins.
+#
+# cache_write is the short-lived (5-minute) cache write where a provider
+# publishes more than one duration. Where a provider publishes no separate
+# cache-write SKU, the write is billed as ordinary input and the input price
+# is repeated here.
+#
+# Prices are list prices for standard (non-batch) processing. A model that is
+# missing from this table keeps its tokens and reports an unknown cost; add a
+# [prices."<model>"] table to the user config to price it.
+
+# --- Anthropic (Claude) -------------------------------------------------
+# fetched: 2026-10-21
+# source: https://platform.claude.com/docs/en/about-claude/pricing
+# Cache write is the 5-minute duration (1-hour writes: opus 8.00,
+# sonnet 4.00, haiku 0.20). Haiku 5.5 is listed at the up-to-100k-token tier;
+# over 100k tokens it is input 0.50, output 2.50, cache read 0.05,
+# cache write 0.625.
+
+[prices."claude-opus-5-5"]
+input = 4.0
+output = 20.0
+cache_read = 0.20
+cache_write = 5.0
+
+[prices."claude-sonnet-5-5"]
+input = 2.0
+output = 10.0
+cache_read = 0.10
+cache_write = 2.50
+
+[prices."claude-haiku-5-5"]
+input = 0.10
+output = 0.50
+cache_read = 0.01
+cache_write = 0.125
+
+# --- OpenAI -------------------------------------------------------------
+# fetched: 2026-10-21
+# source: https://developers.openai.com/api/docs/pricing
+# Standard tier, short context (up to 272K input tokens). Cache write is the
+# 30-minute duration.
+
+[prices."gpt-6.1-sol"]
+input = 2.0
+output = 10.0
+cache_read = 0.10
+cache_write = 2.50
+
+[prices."gpt-6-sol"]
+input = 2.0
+output = 10.0
+cache_read = 0.20
+cache_write = 2.50
+
+[prices."gpt-6-luna"]
+input = 0.10
+output = 0.50
+cache_read = 0.01
+cache_write = 0.125
+
+[prices."gpt-6-astra"]
+input = 10.0
+output = 50.0
+cache_read = 1.0
+cache_write = 12.50
+
+[prices."gpt-5.6-terra"]
+input = 2.0
+output = 12.0
+cache_read = 0.20
+cache_write = 2.50
+
+# --- Moonshot (Kimi) ----------------------------------------------------
+# fetched: 2026-10-21
+# source: https://platform.kimi.ai/docs/pricing/chat-k3
+
+[prices."kimi-k3"]
+input = 3.0
+output = 15.0
+cache_read = 0.30
+cache_write = 3.0
+
+# --- Z.AI (GLM) ---------------------------------------------------------
+# fetched: 2026-10-21
+# source: https://docs.z.ai/guides/overview/pricing
+# No separate cache-write SKU: cache storage is free and writes are billed as
+# input.
+
+[prices."glm-5.3"]
+input = 1.40
+output = 4.40
+cache_read = 0.26
+cache_write = 1.40
+
+# --- Alibaba Cloud (Qwen) ----------------------------------------------
+# fetched: 2026-10-21
+# source: https://www.alibabacloud.com/help/en/model-studio/model-pricing
+# Singapore (International) list price. The same page documents cache hits at
+# 10% of the input price and explicit cache creation at 125% of it.
+
+[prices."qwen3.8-max"]
+input = 2.0
+output = 6.0
+cache_read = 0.20
+cache_write = 2.50
+
+# --- MiniMax ------------------------------------------------------------
+# fetched: 2026-10-21
+# source: https://platform.minimax.io/docs/pricing/overview
+# Standard tier, up to 512K input tokens; over 512K tokens it is input 0.60,
+# output 2.40, cache read 0.12. No separate cache-write SKU.
+
+[prices."minimax-m3"]
+input = 0.30
+output = 1.20
+cache_read = 0.06
+cache_write = 0.30
+
+# --- Deliberately absent ------------------------------------------------
+# deepseek-v4-pro and deepseek-v4.1-flash are left out: the official price
+# list (https://api-docs.deepseek.com/quick_start/pricing) is published in CNY
+# with peak and off-peak tiers, and no official USD list price could be
+# confirmed for the current models. Their cost is reported as unknown until a
+# USD price is configured.

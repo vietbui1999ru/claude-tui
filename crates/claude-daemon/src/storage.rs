@@ -857,7 +857,9 @@ mod tests {
     }
 
     fn make_record(model: ModelType, input: u64, output: u64) -> UsageRecord {
-        let cost = model.compute_cost(input, output, 0, 0);
+        // Storage tests only need a plausible positive cost; real prices come
+        // from the price config, which is covered in claude-common.
+        let cost = (input + output) as f64 / 1_000.0;
         UsageRecord {
             id: None,
             uuid: Uuid::new_v4(),
