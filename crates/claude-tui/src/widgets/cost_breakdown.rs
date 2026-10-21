@@ -68,7 +68,7 @@ fn render_model_bars(frame: &mut Frame, area: Rect, stats: &[ModelStats]) {
             let color = theme::model_color(&s.model);
             Bar::default()
                 .value(pct)
-                .label(Line::from(format!("{}", s.model)))
+                .label(Line::from(s.model.to_string()))
                 .style(Style::new().fg(color))
                 .text_value(format!("${:.2} ({}%)", s.total_cost_usd, pct))
         })

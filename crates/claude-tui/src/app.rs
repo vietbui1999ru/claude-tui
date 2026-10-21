@@ -112,7 +112,7 @@ impl App {
             sessions: Vec::new(),
             model_stats: ModelsCompareResponse { models: Vec::new() },
             project_costs: Vec::new(),
-            time_range: token_chart::TimeRangeSelection::SevenDays,
+            time_range: token_chart::TimeRangeSelection::Week,
             project_scroll: 0,
             session_selected: 0,
             spinner_tick: 0,
@@ -174,13 +174,13 @@ impl App {
                 self.current_tab = Tab::from_index(idx + 1);
             }
             KeyCode::Char('1') if self.current_tab == Tab::Tokens => {
-                self.time_range = token_chart::TimeRangeSelection::SevenDays;
+                self.time_range = token_chart::TimeRangeSelection::Week;
             }
             KeyCode::Char('2') if self.current_tab == Tab::Tokens => {
-                self.time_range = token_chart::TimeRangeSelection::ThirtyDays;
+                self.time_range = token_chart::TimeRangeSelection::Month;
             }
             KeyCode::Char('3') if self.current_tab == Tab::Tokens => {
-                self.time_range = token_chart::TimeRangeSelection::NinetyDays;
+                self.time_range = token_chart::TimeRangeSelection::Quarter;
             }
             KeyCode::Up if self.current_tab == Tab::Costs => {
                 self.project_scroll = self.project_scroll.saturating_sub(1);

@@ -9,25 +9,25 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeRangeSelection {
-    SevenDays,
-    ThirtyDays,
-    NinetyDays,
+    Week,
+    Month,
+    Quarter,
 }
 
 impl TimeRangeSelection {
     pub fn days(&self) -> i64 {
         match self {
-            TimeRangeSelection::SevenDays => 7,
-            TimeRangeSelection::ThirtyDays => 30,
-            TimeRangeSelection::NinetyDays => 90,
+            TimeRangeSelection::Week => 7,
+            TimeRangeSelection::Month => 30,
+            TimeRangeSelection::Quarter => 90,
         }
     }
 
     pub fn index(&self) -> usize {
         match self {
-            TimeRangeSelection::SevenDays => 0,
-            TimeRangeSelection::ThirtyDays => 1,
-            TimeRangeSelection::NinetyDays => 2,
+            TimeRangeSelection::Week => 0,
+            TimeRangeSelection::Month => 1,
+            TimeRangeSelection::Quarter => 2,
         }
     }
 }
