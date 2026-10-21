@@ -4,14 +4,9 @@ use claude_common::{
     ModelsCompareResponse, PriceBook, SessionStatus, StatusResponse, UsageSummaryResponse,
 };
 
-/// Demo model ids used to price the mock data from the embedded default prices.
-fn demo_model_id(model: ModelType) -> &'static str {
-    match model {
-        ModelType::Opus => "claude-opus-5-5",
-        ModelType::Sonnet => "claude-sonnet-5-5",
-        ModelType::Haiku => "claude-haiku-5-5",
-    }
-}
+const DEMO_OPUS: &str = "claude-opus-5-5";
+const DEMO_SONNET: &str = "claude-sonnet-5-5";
+const DEMO_HAIKU: &str = "claude-haiku-5-5";
 
 pub fn mock_status() -> StatusResponse {
     StatusResponse {
@@ -38,21 +33,21 @@ pub fn mock_daily_aggregates() -> Vec<DailyAggregate> {
     let mut aggs = Vec::new();
 
     let data = [
-        (-6, ModelType::Sonnet, 45_000, 18_000, 12_000, 3_000),
-        (-6, ModelType::Opus, 12_000, 5_000, 4_000, 1_000),
-        (-5, ModelType::Sonnet, 82_000, 35_000, 25_000, 6_000),
-        (-5, ModelType::Haiku, 30_000, 10_000, 8_000, 2_000),
-        (-4, ModelType::Opus, 95_000, 42_000, 30_000, 8_000),
-        (-4, ModelType::Sonnet, 110_000, 48_000, 35_000, 9_000),
-        (-3, ModelType::Sonnet, 75_000, 32_000, 22_000, 5_000),
-        (-3, ModelType::Opus, 68_000, 28_000, 20_000, 5_000),
-        (-2, ModelType::Sonnet, 130_000, 55_000, 40_000, 10_000),
-        (-2, ModelType::Haiku, 45_000, 18_000, 12_000, 3_000),
-        (-1, ModelType::Sonnet, 98_000, 40_000, 30_000, 7_000),
-        (-1, ModelType::Opus, 55_000, 22_000, 16_000, 4_000),
-        (0, ModelType::Sonnet, 65_000, 28_000, 20_000, 5_000),
-        (0, ModelType::Opus, 35_000, 15_000, 10_000, 3_000),
-        (0, ModelType::Haiku, 20_000, 8_000, 6_000, 1_500),
+        (-6, DEMO_SONNET, 45_000, 18_000, 12_000, 3_000),
+        (-6, DEMO_OPUS, 12_000, 5_000, 4_000, 1_000),
+        (-5, DEMO_SONNET, 82_000, 35_000, 25_000, 6_000),
+        (-5, DEMO_HAIKU, 30_000, 10_000, 8_000, 2_000),
+        (-4, DEMO_OPUS, 95_000, 42_000, 30_000, 8_000),
+        (-4, DEMO_SONNET, 110_000, 48_000, 35_000, 9_000),
+        (-3, DEMO_SONNET, 75_000, 32_000, 22_000, 5_000),
+        (-3, DEMO_OPUS, 68_000, 28_000, 20_000, 5_000),
+        (-2, DEMO_SONNET, 130_000, 55_000, 40_000, 10_000),
+        (-2, DEMO_HAIKU, 45_000, 18_000, 12_000, 3_000),
+        (-1, DEMO_SONNET, 98_000, 40_000, 30_000, 7_000),
+        (-1, DEMO_OPUS, 55_000, 22_000, 16_000, 4_000),
+        (0, DEMO_SONNET, 65_000, 28_000, 20_000, 5_000),
+        (0, DEMO_OPUS, 35_000, 15_000, 10_000, 3_000),
+        (0, DEMO_HAIKU, 20_000, 8_000, 6_000, 1_500),
     ];
 
     let price_book = PriceBook::embedded().unwrap_or_default();
@@ -60,11 +55,11 @@ pub fn mock_daily_aggregates() -> Vec<DailyAggregate> {
     for (offset, model, input, output, cache_r, cache_w) in data {
         let date = today + chrono::Duration::days(offset);
         let cost = price_book
-            .cost(demo_model_id(model), input, output, cache_r, cache_w)
+            .cost(model, input, output, cache_r, cache_w)
             .unwrap_or(0.0);
         aggs.push(DailyAggregate {
             date,
-            model,
+            model: model.to_string(),
             total_input_tokens: input,
             total_output_tokens: output,
             total_cache_read_tokens: cache_r,
@@ -146,7 +141,7 @@ pub fn mock_model_stats() -> ModelsCompareResponse {
     ModelsCompareResponse {
         models: vec![
             ModelStats {
-                model: ModelType::Opus,
+                model: DEMO_OPUS.to_string(),
                 total_input_tokens: 1_245_000,
                 total_output_tokens: 310_000,
                 total_cost_usd: 67.20,
@@ -156,7 +151,7 @@ pub fn mock_model_stats() -> ModelsCompareResponse {
                 avg_cost_per_request: 1.527,
             },
             ModelStats {
-                model: ModelType::Sonnet,
+                model: DEMO_SONNET.to_string(),
                 total_input_tokens: 2_890_000,
                 total_output_tokens: 640_000,
                 total_cost_usd: 41.50,
@@ -166,7 +161,7 @@ pub fn mock_model_stats() -> ModelsCompareResponse {
                 avg_cost_per_request: 0.174,
             },
             ModelStats {
-                model: ModelType::Haiku,
+                model: DEMO_HAIKU.to_string(),
                 total_input_tokens: 4_120_000,
                 total_output_tokens: 980_000,
                 total_cost_usd: 20.30,
@@ -181,7 +176,7 @@ pub fn mock_model_stats() -> ModelsCompareResponse {
 
 pub struct MockProjectCost {
     pub project: String,
-    pub model: ModelType,
+    pub model: String,
     pub cost: f64,
     pub pct: f64,
 }
@@ -190,31 +185,31 @@ pub fn mock_project_costs() -> Vec<MockProjectCost> {
     vec![
         MockProjectCost {
             project: "ml-pipeline".to_string(),
-            model: ModelType::Opus,
+            model: DEMO_OPUS.to_string(),
             cost: 45.20,
             pct: 0.35,
         },
         MockProjectCost {
             project: "claude-tui".to_string(),
-            model: ModelType::Sonnet,
+            model: DEMO_SONNET.to_string(),
             cost: 18.40,
             pct: 0.14,
         },
         MockProjectCost {
             project: "docs-generator".to_string(),
-            model: ModelType::Sonnet,
+            model: DEMO_SONNET.to_string(),
             cost: 12.80,
             pct: 0.10,
         },
         MockProjectCost {
             project: "code-review".to_string(),
-            model: ModelType::Haiku,
+            model: DEMO_HAIKU.to_string(),
             cost: 8.50,
             pct: 0.07,
         },
         MockProjectCost {
             project: "(other)".to_string(),
-            model: ModelType::Sonnet,
+            model: DEMO_SONNET.to_string(),
             cost: 44.10,
             pct: 0.34,
         },

@@ -105,7 +105,7 @@ fn render_session_list(
                 SessionStatus::Idle => theme::COLOR_WARNING,
                 SessionStatus::Completed => theme::COLOR_TEXT_DIM,
             };
-            let model_color = theme::model_color(&s.model);
+            let model_color = theme::model_color(s.model.as_str());
 
             let style = if i == selected {
                 Style::new().bg(Color::Rgb(50, 60, 80))
@@ -183,7 +183,7 @@ fn render_session_detail(
             Span::styled("  Model:    ", key_style),
             Span::styled(
                 session.model.to_string(),
-                Style::new().fg(theme::model_color(&session.model)),
+                Style::new().fg(theme::model_color(session.model.as_str())),
             ),
         ]),
         Line::from(vec![

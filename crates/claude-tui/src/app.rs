@@ -5,8 +5,8 @@ use crate::theme;
 use crate::widgets::{cost_breakdown, live_monitor, model_compare, token_chart};
 use chrono::Utc;
 use claude_common::{
-    ActiveSession, BudgetConfig, DailyAggregate, ModelType, ModelsCompareResponse,
-    SessionsListParams, StatusResponse, UsageSummaryParams, UsageSummaryResponse,
+    ActiveSession, BudgetConfig, DailyAggregate, ModelsCompareResponse, SessionsListParams,
+    StatusResponse, UsageSummaryParams, UsageSummaryResponse,
 };
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
@@ -444,7 +444,7 @@ impl App {
         let model_color = self
             .status
             .current_model
-            .map(|m| theme::model_color(&m))
+            .map(|m| theme::model_color(m.as_str()))
             .unwrap_or(theme::COLOR_TEXT_DIM);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -583,7 +583,7 @@ impl App {
     }
 }
 
-fn compute_today_model_pcts(aggregates: &[DailyAggregate]) -> Vec<(ModelType, u32)> {
+fn compute_today_model_pcts(aggregates: &[DailyAggregate]) -> Vec<(String, u32)> {
     let today = Utc::now().date_naive();
     let today_aggs: Vec<&DailyAggregate> = aggregates.iter().filter(|a| a.date == today).collect();
 
@@ -593,24 +593,25 @@ fn compute_today_model_pcts(aggregates: &[DailyAggregate]) -> Vec<(ModelType, u3
         .sum();
 
     if total_tokens == 0 {
-        return vec![
-            (ModelType::Sonnet, 0),
-            (ModelType::Opus, 0),
-            (ModelType::Haiku, 0),
-        ];
+        return Vec::new();
     }
 
-    let mut model_pcts: Vec<(ModelType, u32)> = Vec::new();
-    for model in &[ModelType::Opus, ModelType::Sonnet, ModelType::Haiku] {
-        let tokens: u64 = today_aggs
-            .iter()
-            .filter(|a| a.model == *model)
-            .map(|a| a.total_input_tokens + a.total_output_tokens)
-            .sum();
-        let pct = (tokens as f64 / total_tokens as f64 * 100.0) as u32;
-        model_pcts.push((*model, pct));
+    let mut tokens_per_model: std::collections::BTreeMap<&str, u64> =
+        std::collections::BTreeMap::new();
+    for aggregate in &today_aggs {
+        *tokens_per_model
+            .entry(aggregate.model.as_str())
+            .or_default() += aggregate.total_input_tokens + aggregate.total_output_tokens;
     }
 
-    model_pcts.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut model_pcts: Vec<(String, u32)> = tokens_per_model
+        .into_iter()
+        .map(|(model, tokens)| {
+            let pct = (tokens as f64 / total_tokens as f64 * 100.0) as u32;
+            (model.to_string(), pct)
+        })
+        .collect();
+
+    model_pcts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     model_pcts
 }

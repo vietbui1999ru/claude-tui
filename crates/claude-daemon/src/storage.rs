@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use claude_common::protocol::{
     ModelStats, ModelsCompareParams, ModelsCompareResponse, SessionsListParams,
     SessionsListResponse, UsageQueryParams, UsageQueryResponse, UsageSummaryParams,
@@ -8,11 +8,21 @@ use claude_common::protocol::{
 };
 use claude_common::{
     ActiveSession, BudgetConfig, CostSource, DailyAggregate, DataSource, ModelType, Provider,
-    SessionStatus, Subscription, UsageRecord,
+    QuotaHit, QuotaSnapshot, SessionStatus, Subscription, UsageRecord,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::StorageError;
+
+/// Column order shared by every `usage_records` reader.
+const USAGE_COLUMNS: &str = "id, uuid, timestamp, model, input_tokens, output_tokens, \
+     cache_read_tokens, cache_write_tokens, cost_usd, session_id, project, source, \
+     provider, subscription, cost_source, dedup_key";
+
+const INSERT_USAGE_SQL: &str = "INSERT OR IGNORE INTO usage_records (uuid, timestamp, model, \
+     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, session_id, \
+     project, source, provider, subscription, cost_source, dedup_key) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
 
 pub struct Storage {
     conn: Connection,
@@ -34,13 +44,13 @@ impl Storage {
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
 
-        let storage = Self { conn };
+        let mut storage = Self { conn };
         storage.migrate()?;
         Ok(storage)
     }
 
     /// Run database migrations to bring the schema up to date.
-    pub fn migrate(&self) -> Result<(), StorageError> {
+    pub fn migrate(&mut self) -> Result<(), StorageError> {
         self.conn
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS schema_version (
@@ -66,6 +76,9 @@ impl Storage {
 
         if current_version < 1 {
             self.migrate_v1()?;
+        }
+        if current_version < 2 {
+            self.migrate_v2()?;
         }
 
         Ok(())
@@ -151,32 +164,110 @@ impl Storage {
         Ok(())
     }
 
+    /// Migration v2: provider-aware usage rows, quota history and collector
+    /// cursors. Runs in one transaction, so a failure leaves the v1 database
+    /// untouched.
+    ///
+    /// `cost_usd` was `NOT NULL` in v1 and SQLite cannot drop a constraint in
+    /// place, so the table is rebuilt: create, copy, drop, rename, reindex.
+    fn migrate_v2(&mut self) -> Result<(), StorageError> {
+        let sql = r#"
+            CREATE TABLE usage_records_v2 (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid            TEXT NOT NULL UNIQUE,
+                timestamp       TEXT NOT NULL,
+                model           TEXT NOT NULL,
+                input_tokens    INTEGER NOT NULL DEFAULT 0,
+                output_tokens   INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                cost_usd        REAL,
+                session_id      TEXT,
+                project         TEXT,
+                source          TEXT NOT NULL DEFAULT 'log',
+                provider        TEXT NOT NULL DEFAULT 'anthropic',
+                subscription    TEXT NOT NULL DEFAULT 'claude',
+                cost_source     TEXT NOT NULL DEFAULT 'computed',
+                dedup_key       TEXT NOT NULL
+            );
+
+            INSERT INTO usage_records_v2 (
+                id, uuid, timestamp, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, cost_usd, session_id,
+                project, source, provider, subscription, cost_source, dedup_key
+            )
+            SELECT
+                id, uuid, timestamp, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, cost_usd, session_id,
+                project, source, 'anthropic', 'claude', 'computed', uuid
+            FROM usage_records;
+
+            DROP TABLE usage_records;
+            ALTER TABLE usage_records_v2 RENAME TO usage_records;
+
+            CREATE INDEX idx_usage_timestamp ON usage_records(timestamp);
+            CREATE INDEX idx_usage_model_timestamp ON usage_records(model, timestamp);
+            CREATE INDEX idx_usage_session ON usage_records(session_id) WHERE session_id IS NOT NULL;
+            CREATE INDEX idx_usage_project ON usage_records(project) WHERE project IS NOT NULL;
+            CREATE UNIQUE INDEX idx_usage_provider_dedup ON usage_records(provider, dedup_key);
+
+            CREATE TABLE quota_snapshots (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscription  TEXT NOT NULL,
+                "window"      TEXT NOT NULL,
+                used_pct      REAL,
+                resets_at     TEXT,
+                source        TEXT NOT NULL,
+                observed_at   TEXT NOT NULL,
+                plan_type     TEXT
+            );
+
+            CREATE INDEX idx_quota_snapshots_lookup
+                ON quota_snapshots(subscription, "window", observed_at);
+
+            CREATE TABLE quota_hits (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscription  TEXT NOT NULL,
+                period        TEXT,
+                reset_at      TEXT,
+                observed_at   TEXT NOT NULL,
+                raw_kind      TEXT NOT NULL,
+                dedup_key     TEXT NOT NULL UNIQUE
+            );
+
+            CREATE TABLE collector_cursors (
+                collector_id  TEXT NOT NULL,
+                "key"         TEXT NOT NULL,
+                value         TEXT NOT NULL,
+                PRIMARY KEY (collector_id, "key")
+            );
+
+            INSERT OR IGNORE INTO schema_version (version) VALUES (2);
+        "#;
+
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| StorageError::Migration {
+                version: 2,
+                reason: e.to_string(),
+            })?;
+        tx.execute_batch(sql).map_err(|e| StorageError::Migration {
+            version: 2,
+            reason: e.to_string(),
+        })?;
+        tx.commit().map_err(|e| StorageError::Migration {
+            version: 2,
+            reason: e.to_string(),
+        })?;
+
+        Ok(())
+    }
+
     // --- Usage Records ---
 
     pub fn insert_usage(&self, record: &UsageRecord) -> Result<(), StorageError> {
-        let model_str = record.model.to_lowercase();
-        let source_str = "log";
-
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO usage_records (uuid, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, session_id, project, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    record.uuid.to_string(),
-                    record.timestamp.to_rfc3339(),
-                    model_str,
-                    record.input_tokens as i64,
-                    record.output_tokens as i64,
-                    record.cache_read_tokens as i64,
-                    record.cache_write_tokens as i64,
-                    // The v1 schema has no nullable cost column; the v2 migration
-                    // in AC-8 adds one and stores None as NULL.
-                    record.cost_usd.unwrap_or(0.0),
-                    record.session_id,
-                    record.project,
-                    source_str,
-                ],
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        insert_usage_row(&self.conn, record).map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
     }
 
@@ -186,26 +277,7 @@ impl Storage {
             .transaction()
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         for record in records {
-            let model_str = record.model.to_lowercase();
-            let source_str = "log";
-            tx.execute(
-                "INSERT OR IGNORE INTO usage_records (uuid, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, session_id, project, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    record.uuid.to_string(),
-                    record.timestamp.to_rfc3339(),
-                    model_str,
-                    record.input_tokens as i64,
-                    record.output_tokens as i64,
-                    record.cache_read_tokens as i64,
-                    record.cache_write_tokens as i64,
-                    // As in insert_usage: the nullable column arrives in AC-8.
-                    record.cost_usd.unwrap_or(0.0),
-                    record.session_id,
-                    record.project,
-                    source_str,
-                ],
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+            insert_usage_row(&tx, record).map_err(|e| StorageError::Sqlite(e.to_string()))?;
         }
         tx.commit()
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
@@ -251,7 +323,7 @@ impl Storage {
 
         // Get records
         let query_sql = format!(
-            "SELECT id, uuid, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, session_id, project, source FROM usage_records {where_sql} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+            "SELECT {USAGE_COLUMNS} FROM usage_records {where_sql} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         );
         let mut all_binds: Vec<&dyn rusqlite::types::ToSql> =
             bind_values.iter().map(|b| b.as_ref()).collect();
@@ -330,7 +402,7 @@ impl Storage {
                 Ok(DailyAggregate {
                     date: NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
                         .unwrap_or_else(|_| Utc::now().date_naive()),
-                    model: model_str.parse().unwrap_or(ModelType::Sonnet),
+                    model: model_str,
                     total_input_tokens: row.get::<_, i64>(2)? as u64,
                     total_output_tokens: row.get::<_, i64>(3)? as u64,
                     total_cache_read_tokens: row.get::<_, i64>(4)? as u64,
@@ -389,7 +461,7 @@ impl Storage {
                 Ok(DailyAggregate {
                     date: NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
                         .unwrap_or_else(|_| Utc::now().date_naive()),
-                    model: model_str.parse().unwrap_or(ModelType::Sonnet),
+                    model: model_str,
                     total_input_tokens: row.get::<_, i64>(2)? as u64,
                     total_output_tokens: row.get::<_, i64>(3)? as u64,
                     total_cache_read_tokens: row.get::<_, i64>(4)? as u64,
@@ -432,6 +504,125 @@ impl Storage {
             )
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
 
+        Ok(())
+    }
+
+    // --- Quota snapshots and hits ---
+
+    pub fn insert_quota_snapshot(&self, snapshot: &QuotaSnapshot) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                "INSERT INTO quota_snapshots (subscription, \"window\", used_pct, resets_at, source, observed_at, plan_type) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    snapshot.subscription.as_str(),
+                    snapshot.window,
+                    snapshot.used_pct,
+                    snapshot.resets_at.map(|ts| ts.to_rfc3339()),
+                    snapshot.source.as_str(),
+                    snapshot.observed_at.to_rfc3339(),
+                    snapshot.plan_type,
+                ],
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// The newest snapshot per window for one subscription.
+    pub fn latest_quota(
+        &self,
+        subscription: Subscription,
+    ) -> Result<Vec<QuotaSnapshot>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, subscription, \"window\", used_pct, resets_at, source, observed_at, plan_type \
+                 FROM quota_snapshots q \
+                 WHERE q.subscription = ?1 \
+                   AND q.id = (\
+                       SELECT q2.id FROM quota_snapshots q2 \
+                       WHERE q2.subscription = q.subscription AND q2.\"window\" = q.\"window\" \
+                       ORDER BY q2.observed_at DESC, q2.id DESC LIMIT 1\
+                   ) \
+                 ORDER BY q.\"window\" ASC",
+            )
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+
+        let snapshots = stmt
+            .query_map(params![subscription.as_str()], row_to_quota_snapshot)
+            .map_err(|e| StorageError::Query(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+
+        Ok(snapshots)
+    }
+
+    /// Insert a quota hit. A repeated `dedup_key` is ignored.
+    pub fn insert_quota_hit(&self, hit: &QuotaHit) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO quota_hits (subscription, period, reset_at, observed_at, raw_kind, dedup_key) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    hit.subscription.as_str(),
+                    hit.period,
+                    hit.reset_at.map(|ts| ts.to_rfc3339()),
+                    hit.observed_at.to_rfc3339(),
+                    hit.raw_kind,
+                    hit.dedup_key,
+                ],
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// The most recent quota hit for one subscription.
+    pub fn latest_quota_hit(
+        &self,
+        subscription: Subscription,
+    ) -> Result<Option<QuotaHit>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, subscription, period, reset_at, observed_at, raw_kind, dedup_key \
+                 FROM quota_hits WHERE subscription = ?1 \
+                 ORDER BY observed_at DESC, id DESC LIMIT 1",
+                params![subscription.as_str()],
+                row_to_quota_hit,
+            )
+            .optional()
+            .map_err(|e| StorageError::Query(e.to_string()))
+    }
+
+    // --- Collector cursors ---
+
+    pub fn get_cursor(
+        &self,
+        collector_id: &str,
+        key: &str,
+    ) -> Result<Option<String>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT value FROM collector_cursors WHERE collector_id = ?1 AND \"key\" = ?2",
+                params![collector_id, key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::Query(e.to_string()))
+    }
+
+    pub fn set_cursor(
+        &self,
+        collector_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO collector_cursors (collector_id, \"key\", value) \
+                 VALUES (?1, ?2, ?3)",
+                params![collector_id, key, value],
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
     }
 
@@ -720,7 +911,7 @@ impl Storage {
                 };
 
                 Ok(ModelStats {
-                    model: model_str.parse().unwrap_or(ModelType::Sonnet),
+                    model: model_str,
                     total_input_tokens: total_input as u64,
                     total_output_tokens: total_output as u64,
                     total_cost_usd: total_cost,
@@ -738,11 +929,39 @@ impl Storage {
     }
 }
 
+fn insert_usage_row(conn: &Connection, record: &UsageRecord) -> Result<usize, rusqlite::Error> {
+    let model = record.model.to_lowercase();
+    conn.execute(
+        INSERT_USAGE_SQL,
+        params![
+            record.uuid.to_string(),
+            record.timestamp.to_rfc3339(),
+            model,
+            record.input_tokens as i64,
+            record.output_tokens as i64,
+            record.cache_read_tokens as i64,
+            record.cache_write_tokens as i64,
+            record.cost_usd,
+            record.session_id,
+            record.project,
+            record.source.as_str(),
+            record.provider.as_str(),
+            record.subscription.as_str(),
+            record.cost_source.as_str(),
+            record.dedup_key,
+        ],
+    )
+}
+
 fn row_to_usage_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord> {
     let uuid_str: String = row.get(1)?;
     let ts_str: String = row.get(2)?;
-    let model_str: String = row.get(3)?;
-    let _source_str: String = row.get(11)?;
+    let model = row.get::<_, String>(3)?;
+    let source_str: String = row.get(11)?;
+    let provider_str: String = row.get(12)?;
+    let subscription_str: String = row.get(13)?;
+    let cost_source_str: String = row.get(14)?;
+    let dedup_key: String = row.get(15)?;
 
     let uuid = uuid_str.parse().map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -754,39 +973,101 @@ fn row_to_usage_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord>
             )),
         )
     })?;
-    let timestamp = chrono::DateTime::parse_from_rfc3339(&ts_str)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                2,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("bad timestamp: {e}"),
-                )),
-            )
-        })?;
-    let model = model_str;
+    let timestamp = parse_rfc3339(&ts_str, 2)?;
 
     Ok(UsageRecord {
         id: row.get(0)?,
         uuid,
         timestamp,
         model,
-        // The v1 schema stores no provider or subscription; AC-8's v2 migration
-        // backfills those columns with the same values.
-        provider: Provider::Anthropic,
-        subscription: Subscription::Claude,
+        // Rows written by the v1 schema carry no provider, subscription or
+        // cost source; the v2 migration backfills them, and an unrecognised
+        // value is read as unknown rather than failing the whole query.
+        provider: provider_str.parse().unwrap_or(Provider::Other),
+        subscription: subscription_str.parse().unwrap_or(Subscription::Other),
         input_tokens: row.get::<_, i64>(4)? as u64,
         output_tokens: row.get::<_, i64>(5)? as u64,
         cache_read_tokens: row.get::<_, i64>(6)? as u64,
         cache_write_tokens: row.get::<_, i64>(7)? as u64,
-        cost_usd: Some(row.get(8)?),
-        cost_source: CostSource::Computed,
-        dedup_key: uuid_str,
+        cost_usd: row.get(8)?,
+        cost_source: cost_source_str.parse().unwrap_or(CostSource::Unknown),
+        dedup_key,
         session_id: row.get(9)?,
         project: row.get(10)?,
-        source: DataSource::Log,
+        // v1 wrote `api` for rows it did not otherwise label; those were
+        // Claude Code log rows.
+        source: source_str.parse().unwrap_or(DataSource::Log),
+    })
+}
+
+fn row_to_quota_snapshot(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuotaSnapshot> {
+    let subscription_str: String = row.get(1)?;
+    let source_str: String = row.get(5)?;
+    let observed_at_str: String = row.get(6)?;
+    let resets_at_str: Option<String> = row.get(4)?;
+
+    Ok(QuotaSnapshot {
+        id: row.get(0)?,
+        subscription: parse_column(&subscription_str, 1)?,
+        window: row.get(2)?,
+        used_pct: row.get(3)?,
+        resets_at: resets_at_str
+            .as_deref()
+            .map(|ts| parse_rfc3339(ts, 4))
+            .transpose()?,
+        source: parse_column(&source_str, 5)?,
+        observed_at: parse_rfc3339(&observed_at_str, 6)?,
+        plan_type: row.get(7)?,
+    })
+}
+
+fn row_to_quota_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuotaHit> {
+    let subscription_str: String = row.get(1)?;
+    let observed_at_str: String = row.get(4)?;
+    let reset_at_str: Option<String> = row.get(3)?;
+
+    Ok(QuotaHit {
+        id: row.get(0)?,
+        subscription: parse_column(&subscription_str, 1)?,
+        period: row.get(2)?,
+        reset_at: reset_at_str
+            .as_deref()
+            .map(|ts| parse_rfc3339(ts, 3))
+            .transpose()?,
+        observed_at: parse_rfc3339(&observed_at_str, 4)?,
+        raw_kind: row.get(5)?,
+        dedup_key: row.get(6)?,
+    })
+}
+
+/// Parse an RFC 3339 timestamp column, keeping the column number in the error.
+fn parse_rfc3339(text: &str, column: usize) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(text)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                column,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("bad timestamp: {e}"),
+                )),
+            )
+        })
+}
+
+/// Parse an enum stored as its `as_str` form. Quota rows are always written by
+/// this crate, so an unknown value is a corrupt row, not a legacy one.
+fn parse_column<T>(text: &str, column: usize) -> rusqlite::Result<T>
+where
+    T: std::str::FromStr<Err = String>,
+{
+    text.parse().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
     })
 }
 
@@ -853,12 +1134,73 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActiveSession> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
+    use std::path::PathBuf;
     use uuid::Uuid;
 
     fn test_storage() -> Storage {
         Storage::new(":memory:").expect("failed to create in-memory storage")
     }
+
+    fn all_usage() -> UsageQueryParams {
+        UsageQueryParams {
+            time_range: None,
+            model: None,
+            project: None,
+            limit: 100,
+            offset: 0,
+        }
+    }
+
+    /// A throwaway SQLite file that never touches the real home directory.
+    struct TempDb(PathBuf);
+
+    impl TempDb {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!("claude-tui-test-{}.db", Uuid::new_v4())))
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().expect("temp path is not UTF-8")
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let path = format!("{}{suffix}", self.0.display());
+                if let Err(e) = std::fs::remove_file(&path)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    eprintln!("failed to remove test database {path}: {e}");
+                }
+            }
+        }
+    }
+
+    /// The v1 schema exactly as the previous release created it.
+    const V1_USAGE_DDL: &str = r#"
+        CREATE TABLE usage_records (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid            TEXT NOT NULL UNIQUE,
+            timestamp       TEXT NOT NULL,
+            model           TEXT NOT NULL,
+            input_tokens    INTEGER NOT NULL DEFAULT 0,
+            output_tokens   INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd        REAL NOT NULL DEFAULT 0.0,
+            session_id      TEXT,
+            project         TEXT,
+            source          TEXT NOT NULL DEFAULT 'api'
+        );
+        CREATE INDEX idx_usage_timestamp ON usage_records(timestamp);
+        CREATE INDEX idx_usage_model_timestamp ON usage_records(model, timestamp);
+        CREATE INDEX idx_usage_session ON usage_records(session_id) WHERE session_id IS NOT NULL;
+        CREATE INDEX idx_usage_project ON usage_records(project) WHERE project IS NOT NULL;
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version (version) VALUES (1);
+    "#;
 
     fn make_record(model: ModelType, input: u64, output: u64) -> UsageRecord {
         // Storage tests only need a plausible positive cost; real prices come
@@ -1138,11 +1480,7 @@ mod tests {
             .unwrap();
         assert_eq!(stats.models.len(), 2);
 
-        let sonnet_stats = stats
-            .models
-            .iter()
-            .find(|m| m.model == ModelType::Sonnet)
-            .unwrap();
+        let sonnet_stats = stats.models.iter().find(|m| m.model == "sonnet").unwrap();
         assert_eq!(sonnet_stats.request_count, 2);
         assert_eq!(sonnet_stats.total_input_tokens, 3000);
     }
@@ -1169,5 +1507,294 @@ mod tests {
         assert!(summary.total_cost_usd > 0.0);
         assert_eq!(summary.total_input_tokens, 3000);
         assert_eq!(summary.total_output_tokens, 1500);
+    }
+
+    #[test]
+    fn migrate_v2_upgrades_v1_database_without_row_loss() {
+        let db = TempDb::new();
+        let sonnet_uuid = Uuid::new_v4();
+        let opus_uuid = Uuid::new_v4();
+
+        {
+            let conn = Connection::open(db.path()).unwrap();
+            conn.execute_batch(V1_USAGE_DDL).unwrap();
+            for (uuid, model, cost) in [
+                (sonnet_uuid, "claude-sonnet-5-5", 0.25_f64),
+                (opus_uuid, "claude-opus-5-5", 1.5_f64),
+            ] {
+                conn.execute(
+                    "INSERT INTO usage_records (uuid, timestamp, model, input_tokens, output_tokens, cost_usd, session_id, project, source) \
+                     VALUES (?1, ?2, ?3, 100, 50, ?4, 'sess-1', 'proj-1', 'log')",
+                    params![uuid.to_string(), Utc::now().to_rfc3339(), model, cost],
+                )
+                .unwrap();
+            }
+        }
+
+        let storage = Storage::new(db.path()).unwrap();
+
+        let result = storage.query_usage(&all_usage()).unwrap();
+        assert_eq!(result.total_count, 2);
+        assert_eq!(result.records.len(), 2);
+        for record in &result.records {
+            assert_eq!(record.provider, Provider::Anthropic);
+            assert_eq!(record.subscription, Subscription::Claude);
+            assert_eq!(record.cost_source, CostSource::Computed);
+            assert_eq!(record.dedup_key, record.uuid.to_string());
+        }
+
+        let version: i64 = storage
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+
+        let cost: Option<f64> = storage
+            .conn
+            .query_row(
+                "SELECT cost_usd FROM usage_records WHERE uuid = ?1",
+                params![opus_uuid.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cost, Some(1.5));
+    }
+
+    #[test]
+    fn migrate_v2_runs_twice_as_a_noop() {
+        let mut storage = test_storage();
+        storage
+            .insert_usage(&make_record(ModelType::Sonnet, 10, 5))
+            .unwrap();
+
+        storage.migrate().unwrap();
+        storage.migrate().unwrap();
+
+        let version: i64 = storage
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+
+        let versions: i64 = storage
+            .conn
+            .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(versions, 2);
+
+        let result = storage.query_usage(&all_usage()).unwrap();
+        assert_eq!(result.total_count, 1);
+    }
+
+    #[test]
+    fn migrate_v2_null_cost_round_trips() {
+        let storage = test_storage();
+        let mut record = make_record(ModelType::Sonnet, 100, 50);
+        record.model = "gpt-6.1-sol".to_string();
+        record.provider = Provider::OpenAiCodex;
+        record.subscription = Subscription::ChatGpt;
+        record.cost_usd = None;
+        record.cost_source = CostSource::Unknown;
+        record.source = DataSource::CodexRollout;
+        record.dedup_key = "response-1".to_string();
+        storage.insert_usage(&record).unwrap();
+
+        let result = storage.query_usage(&all_usage()).unwrap();
+        assert_eq!(result.total_count, 1);
+        let stored = &result.records[0];
+        assert_eq!(stored.cost_usd, None);
+        assert_eq!(stored.cost_source, CostSource::Unknown);
+        assert_eq!(stored.provider, Provider::OpenAiCodex);
+        assert_eq!(stored.subscription, Subscription::ChatGpt);
+        assert_eq!(stored.source, DataSource::CodexRollout);
+        assert_eq!(stored.dedup_key, "response-1");
+        assert_eq!(stored.model, "gpt-6.1-sol");
+    }
+
+    #[test]
+    fn migrate_v2_dedup_key_is_unique_per_provider() {
+        let mut storage = test_storage();
+
+        let mut anthropic = make_record(ModelType::Sonnet, 100, 50);
+        anthropic.dedup_key = "shared-key".to_string();
+        let mut duplicate = anthropic.clone();
+        duplicate.uuid = Uuid::new_v4();
+        let mut codex = duplicate.clone();
+        codex.uuid = Uuid::new_v4();
+        codex.provider = Provider::OpenAiCodex;
+        codex.subscription = Subscription::ChatGpt;
+        codex.source = DataSource::CodexRollout;
+
+        storage
+            .insert_usage_batch(&[anthropic, duplicate, codex])
+            .unwrap();
+
+        let result = storage.query_usage(&all_usage()).unwrap();
+        assert_eq!(result.total_count, 2);
+    }
+
+    #[test]
+    fn migrate_v2_quota_snapshot_keeps_latest_per_window() {
+        let storage = test_storage();
+        let now = Utc::now();
+
+        let snapshot = |subscription: Subscription,
+                        window: &str,
+                        used_pct: f64,
+                        observed_at: DateTime<Utc>,
+                        plan_type: Option<&str>| QuotaSnapshot {
+            id: None,
+            subscription,
+            window: window.to_string(),
+            used_pct: Some(used_pct),
+            resets_at: Some(observed_at + chrono::Duration::hours(1)),
+            source: DataSource::CodexRollout,
+            observed_at,
+            plan_type: plan_type.map(str::to_string),
+        };
+
+        storage
+            .insert_quota_snapshot(&snapshot(
+                Subscription::ChatGpt,
+                "primary",
+                10.0,
+                now - chrono::Duration::minutes(5),
+                Some("plus"),
+            ))
+            .unwrap();
+        storage
+            .insert_quota_snapshot(&snapshot(
+                Subscription::ChatGpt,
+                "primary",
+                42.0,
+                now,
+                Some("plus"),
+            ))
+            .unwrap();
+        storage
+            .insert_quota_snapshot(&snapshot(
+                Subscription::ChatGpt,
+                "secondary",
+                7.0,
+                now,
+                None,
+            ))
+            .unwrap();
+        storage
+            .insert_quota_snapshot(&snapshot(
+                Subscription::Claude,
+                "five_hour",
+                99.0,
+                now,
+                None,
+            ))
+            .unwrap();
+
+        let chatgpt = storage.latest_quota(Subscription::ChatGpt).unwrap();
+        assert_eq!(chatgpt.len(), 2);
+        let primary = chatgpt
+            .iter()
+            .find(|q| q.window == "primary")
+            .expect("primary window missing");
+        assert_eq!(primary.used_pct, Some(42.0));
+        assert_eq!(primary.plan_type.as_deref(), Some("plus"));
+        assert_eq!(primary.source, DataSource::CodexRollout);
+        assert_eq!(primary.observed_at, now);
+
+        let claude = storage.latest_quota(Subscription::Claude).unwrap();
+        assert_eq!(claude.len(), 1);
+        assert_eq!(claude[0].window, "five_hour");
+        assert_eq!(claude[0].used_pct, Some(99.0));
+
+        assert!(
+            storage
+                .latest_quota(Subscription::OpencodeGo)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn migrate_v2_quota_hit_dedup_and_latest() {
+        let storage = test_storage();
+        let now = Utc::now();
+
+        let hit = |dedup_key: &str, observed_at: DateTime<Utc>, period: Option<&str>| QuotaHit {
+            id: None,
+            subscription: Subscription::OpencodeGo,
+            period: period.map(str::to_string),
+            reset_at: Some(observed_at + chrono::Duration::hours(5)),
+            observed_at,
+            raw_kind: "go_usage_limit".to_string(),
+            dedup_key: dedup_key.to_string(),
+        };
+
+        storage
+            .insert_quota_hit(&hit(
+                "entry-a",
+                now - chrono::Duration::hours(1),
+                Some("5h"),
+            ))
+            .unwrap();
+        // Same dedup key: ignored, even though the observation time differs.
+        storage
+            .insert_quota_hit(&hit("entry-a", now, Some("5h")))
+            .unwrap();
+        storage
+            .insert_quota_hit(&hit("entry-b", now, None))
+            .unwrap();
+
+        let latest = storage
+            .latest_quota_hit(Subscription::OpencodeGo)
+            .unwrap()
+            .expect("quota hit missing");
+        assert_eq!(latest.dedup_key, "entry-b");
+        assert_eq!(latest.period, None);
+        assert_eq!(latest.raw_kind, "go_usage_limit");
+        assert_eq!(latest.subscription, Subscription::OpencodeGo);
+        assert!(latest.reset_at.is_some());
+
+        assert!(
+            storage
+                .latest_quota_hit(Subscription::Claude)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn migrate_v2_cursor_round_trip() {
+        let storage = test_storage();
+
+        assert_eq!(
+            storage
+                .get_cursor("codex-rollouts", "file:/a.jsonl")
+                .unwrap(),
+            None
+        );
+
+        storage
+            .set_cursor("codex-rollouts", "file:/a.jsonl", "128")
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_cursor("codex-rollouts", "file:/a.jsonl")
+                .unwrap(),
+            Some("128".to_string())
+        );
+
+        storage
+            .set_cursor("codex-rollouts", "file:/a.jsonl", "256")
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_cursor("codex-rollouts", "file:/a.jsonl")
+                .unwrap(),
+            Some("256".to_string())
+        );
+        assert_eq!(
+            storage.get_cursor("pi-sessions", "file:/a.jsonl").unwrap(),
+            None
+        );
     }
 }

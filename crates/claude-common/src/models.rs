@@ -79,6 +79,39 @@ pub enum DataSource {
     OpencodeDb,
 }
 
+impl DataSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DataSource::Log => "log",
+            DataSource::ClaudeQuota => "claude-quota",
+            DataSource::CodexRollout => "codex-rollout",
+            DataSource::PiSession => "pi-session",
+            DataSource::OpencodeDb => "opencode-db",
+        }
+    }
+}
+
+impl fmt::Display for DataSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for DataSource {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "log" => Ok(DataSource::Log),
+            "claude-quota" => Ok(DataSource::ClaudeQuota),
+            "codex-rollout" => Ok(DataSource::CodexRollout),
+            "pi-session" => Ok(DataSource::PiSession),
+            "opencode-db" => Ok(DataSource::OpencodeDb),
+            other => Err(format!("unknown data source: {other}")),
+        }
+    }
+}
+
 /// The upstream model provider that billed a record's tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -108,6 +141,20 @@ impl fmt::Display for Provider {
     }
 }
 
+impl std::str::FromStr for Provider {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "anthropic" => Ok(Provider::Anthropic),
+            "openai-codex" => Ok(Provider::OpenAiCodex),
+            "opencode-go" => Ok(Provider::OpencodeGo),
+            "other" => Ok(Provider::Other),
+            other => Err(format!("unknown provider: {other}")),
+        }
+    }
+}
+
 /// The subscription a record's usage counts against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -133,6 +180,20 @@ impl Subscription {
 impl fmt::Display for Subscription {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Subscription {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "claude" => Ok(Subscription::Claude),
+            "chatgpt" => Ok(Subscription::ChatGpt),
+            "opencode-go" => Ok(Subscription::OpencodeGo),
+            "other" => Ok(Subscription::Other),
+            other => Err(format!("unknown subscription: {other}")),
+        }
     }
 }
 
@@ -183,6 +244,19 @@ impl fmt::Display for CostSource {
     }
 }
 
+impl std::str::FromStr for CostSource {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "reported" => Ok(CostSource::Reported),
+            "computed" => Ok(CostSource::Computed),
+            "unknown" => Ok(CostSource::Unknown),
+            other => Err(format!("unknown cost source: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
     /// Auto-incremented database ID. None before insertion.
@@ -217,6 +291,46 @@ pub struct UsageRecord {
     pub project: Option<String>,
     /// Where the record was collected from.
     pub source: DataSource,
+}
+
+/// One observation of a provider-reported quota window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaSnapshot {
+    /// Auto-incremented database ID. None before insertion.
+    pub id: Option<i64>,
+    /// The subscription this window belongs to.
+    pub subscription: Subscription,
+    /// Window name as the source reports it, e.g. `five_hour` or `primary`.
+    pub window: String,
+    /// Used percentage (0-100). None when the provider exposes no percentage.
+    pub used_pct: Option<f64>,
+    /// When the window resets, if known.
+    pub resets_at: Option<DateTime<Utc>>,
+    /// Where the snapshot was collected from.
+    pub source: DataSource,
+    /// When the snapshot was observed.
+    pub observed_at: DateTime<Utc>,
+    /// Plan name as the provider reports it, e.g. `plus`.
+    pub plan_type: Option<String>,
+}
+
+/// One provider quota-limit event (a 429 or an "usage limit reached" message).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaHit {
+    /// Auto-incremented database ID. None before insertion.
+    pub id: Option<i64>,
+    /// The subscription whose limit was hit.
+    pub subscription: Subscription,
+    /// Limit window if the source names one (`5h`, `weekly`, `monthly`).
+    pub period: Option<String>,
+    /// When the limit resets, if the source says.
+    pub reset_at: Option<DateTime<Utc>>,
+    /// When the hit was observed.
+    pub observed_at: DateTime<Utc>,
+    /// The source error kind that produced the hit, e.g. `go_usage_limit`.
+    pub raw_kind: String,
+    /// Stable de-duplication key for the hit.
+    pub dedup_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,7 +375,8 @@ impl Default for BudgetConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyAggregate {
     pub date: NaiveDate,
-    pub model: ModelType,
+    /// Model id as the source reports it, e.g. `claude-sonnet-5-5`.
+    pub model: String,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cache_read_tokens: u64,

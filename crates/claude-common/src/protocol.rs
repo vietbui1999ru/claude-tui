@@ -174,7 +174,8 @@ pub struct ModelsCompareResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelStats {
-    pub model: ModelType,
+    /// Model id as the source reports it, e.g. `claude-opus-5-5`.
+    pub model: String,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cost_usd: f64,
@@ -412,7 +413,7 @@ mod tests {
     fn test_models_compare_response_roundtrip() {
         let resp = ModelsCompareResponse {
             models: vec![ModelStats {
-                model: ModelType::Opus,
+                model: "claude-opus-5-5".to_string(),
                 total_input_tokens: 1_000_000,
                 total_output_tokens: 500_000,
                 total_cost_usd: 52.5,
@@ -425,7 +426,7 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: ModelsCompareResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.models.len(), 1);
-        assert_eq!(parsed.models[0].model, ModelType::Opus);
+        assert_eq!(parsed.models[0].model, "claude-opus-5-5");
     }
 
     #[test]
