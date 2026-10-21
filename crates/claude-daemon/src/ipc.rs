@@ -189,6 +189,16 @@ async fn handle_request(
                 .daily_limit_usd
                 .map(|limit| if limit > 0.0 { cost_today / limit } else { 0.0 });
 
+            // Per-subscription usage, quota and freshness (AC-9). A failed
+            // aggregate leaves the list empty rather than failing `status`.
+            let subscriptions = match storage.subscription_statuses(chrono::Utc::now()) {
+                Ok(subscriptions) => subscriptions,
+                Err(e) => {
+                    warn!("status: subscription aggregates failed: {e}");
+                    Vec::new()
+                }
+            };
+
             let resp = StatusResponse {
                 daemon_uptime_secs: uptime,
                 active_sessions: sessions.total_count as u32,
@@ -196,6 +206,7 @@ async fn handle_request(
                 cost_today_usd: cost_today,
                 budget_pct,
                 collector_status: cs,
+                subscriptions,
             };
             RpcResponse::success(request.id, serde_json::to_value(&resp).unwrap_or_default())
         }
@@ -332,7 +343,11 @@ async fn handle_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
     use claude_common::protocol::RpcRequest;
+    use claude_common::{
+        CostSource, DataSource, Provider, QuotaHit, QuotaSnapshot, Subscription, UsageRecord,
+    };
 
     fn make_request(method: &str, params: serde_json::Value) -> RpcRequest {
         RpcRequest {
@@ -341,6 +356,229 @@ mod tests {
             method: method.to_string(),
             params,
         }
+    }
+
+    /// One usage row, as a collector would have stored it.
+    fn usage_record(
+        subscription: Subscription,
+        provider: Provider,
+        source: DataSource,
+        timestamp: chrono::DateTime<Utc>,
+        input: u64,
+        output: u64,
+        cost: Option<(f64, CostSource)>,
+    ) -> UsageRecord {
+        let uuid = uuid::Uuid::new_v4();
+        UsageRecord {
+            id: None,
+            uuid,
+            timestamp,
+            model: "test-model".to_string(),
+            provider,
+            subscription,
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: cost.map(|(usd, _)| usd),
+            cost_source: cost
+                .map(|(_, source)| source)
+                .unwrap_or(CostSource::Unknown),
+            dedup_key: uuid.to_string(),
+            session_id: None,
+            project: None,
+            source,
+        }
+    }
+
+    #[tokio::test]
+    async fn status_rpc_subscriptions_group_sums_and_flags() {
+        let storage = Arc::new(Mutex::new(Storage::new(":memory:").unwrap()));
+        let start_time = std::time::Instant::now();
+        let collector_status = Arc::new(Mutex::new(CollectorStatus::Log));
+        let now = Utc::now();
+
+        {
+            let mut storage = storage.lock().await;
+            storage
+                .insert_usage_batch(&[
+                    // Claude Code, today.
+                    usage_record(
+                        Subscription::Claude,
+                        Provider::Anthropic,
+                        DataSource::Log,
+                        now,
+                        1_000,
+                        500,
+                        Some((1.5, CostSource::Computed)),
+                    ),
+                    // Codex CLI, today, and an old row that only the 7d
+                    // window sees.
+                    usage_record(
+                        Subscription::ChatGpt,
+                        Provider::OpenAiCodex,
+                        DataSource::CodexRollout,
+                        now,
+                        2_000,
+                        300,
+                        Some((0.25, CostSource::Computed)),
+                    ),
+                    usage_record(
+                        Subscription::ChatGpt,
+                        Provider::OpenAiCodex,
+                        DataSource::CodexRollout,
+                        now - Duration::days(3),
+                        400,
+                        100,
+                        Some((0.05, CostSource::Reported)),
+                    ),
+                    // opencode-go through Pi today, through OpenCode three
+                    // days ago: the OpenCode source is stale.
+                    usage_record(
+                        Subscription::OpencodeGo,
+                        Provider::OpencodeGo,
+                        DataSource::PiSession,
+                        now,
+                        100,
+                        50,
+                        Some((0.01, CostSource::Reported)),
+                    ),
+                    usage_record(
+                        Subscription::OpencodeGo,
+                        Provider::OpencodeGo,
+                        DataSource::OpencodeDb,
+                        now - Duration::days(3),
+                        10,
+                        5,
+                        Some((0.02, CostSource::Reported)),
+                    ),
+                    // A provider the dashboard does not know: `other`.
+                    usage_record(
+                        Subscription::Other,
+                        Provider::Other,
+                        DataSource::PiSession,
+                        now - Duration::days(2),
+                        7,
+                        1,
+                        Some((0.0, CostSource::Reported)),
+                    ),
+                ])
+                .unwrap();
+            storage
+                .insert_quota_snapshot(&QuotaSnapshot {
+                    id: None,
+                    subscription: Subscription::Claude,
+                    window: "five_hour".to_string(),
+                    used_pct: Some(34.0),
+                    resets_at: Some(now + Duration::hours(4)),
+                    source: DataSource::ClaudeQuota,
+                    observed_at: now - Duration::minutes(5),
+                    plan_type: None,
+                })
+                .unwrap();
+            // A quota window nobody has refreshed in three days.
+            storage
+                .insert_quota_snapshot(&QuotaSnapshot {
+                    id: None,
+                    subscription: Subscription::ChatGpt,
+                    window: "primary".to_string(),
+                    used_pct: Some(80.0),
+                    resets_at: Some(now - Duration::minutes(1)),
+                    source: DataSource::CodexRollout,
+                    observed_at: now - Duration::days(3),
+                    plan_type: Some("plus".to_string()),
+                })
+                .unwrap();
+            storage
+                .insert_quota_hit(&QuotaHit {
+                    id: None,
+                    subscription: Subscription::OpencodeGo,
+                    period: Some("5h".to_string()),
+                    reset_at: Some(now + Duration::hours(2)),
+                    observed_at: now - Duration::minutes(30),
+                    raw_kind: "go_usage_limit".to_string(),
+                    dedup_key: "hit-1".to_string(),
+                })
+                .unwrap();
+        }
+
+        let req = make_request("status", serde_json::Value::Null);
+        let resp = handle_request(&storage, &req, start_time, &collector_status).await;
+        let status: claude_common::protocol::StatusResponse =
+            serde_json::from_value(resp.result.expect("status result")).unwrap();
+
+        let ids: Vec<&str> = status
+            .subscriptions
+            .iter()
+            .map(|s| s.subscription.as_str())
+            .collect();
+        assert_eq!(ids, vec!["claude", "chatgpt", "opencode-go", "other"]);
+
+        let claude = &status.subscriptions[0];
+        assert_eq!(claude.today.input, 1_000);
+        assert_eq!(claude.today.output, 500);
+        assert!((claude.today.cost_usd.expect("claude cost") - 1.5).abs() < 1e-10);
+        assert_eq!(claude.today.cost_source, CostSource::Computed);
+        assert_eq!(claude.quota.len(), 1);
+        assert_eq!(claude.quota[0].window, "five_hour");
+        assert_eq!(claude.quota[0].used_pct, Some(34.0));
+        assert_eq!(claude.quota[0].source, DataSource::ClaudeQuota);
+        assert!(!claude.quota[0].stale, "fresh snapshot");
+        assert!(!claude.quota[0].expired, "reset is in the future");
+        assert!(claude.last_quota_hit.is_none());
+        let claude_sources: Vec<&str> = claude
+            .sources
+            .iter()
+            .map(|s| s.collector_id.as_str())
+            .collect();
+        assert_eq!(claude_sources, vec!["claude-logs", "claude-quota"]);
+        assert!(claude.sources.iter().all(|s| !s.stale));
+
+        let chatgpt = &status.subscriptions[1];
+        assert_eq!(chatgpt.today.input, 2_000, "today excludes the old row");
+        assert_eq!(chatgpt.last_7d.input, 2_400, "7d includes it");
+        assert_eq!(chatgpt.quota.len(), 1);
+        assert!(chatgpt.quota[0].stale, "no update in 24h");
+        assert!(chatgpt.quota[0].expired, "reset time is in the past");
+        // The codex rollout collector is live, even though the quota window it
+        // last reported is three days old.
+        assert!(chatgpt.sources.iter().all(|s| !s.stale));
+
+        let opencode = &status.subscriptions[2];
+        assert_eq!(opencode.today.input, 100);
+        assert_eq!(opencode.last_7d.input, 110);
+        let tools: Vec<(&str, &str)> = opencode
+            .by_tool
+            .iter()
+            .map(|t| (t.provider.as_str(), t.source.as_str()))
+            .collect();
+        assert_eq!(
+            tools,
+            vec![
+                ("opencode-go", "opencode-db"),
+                ("opencode-go", "pi-session")
+            ]
+        );
+        let pi_tool = opencode
+            .by_tool
+            .iter()
+            .find(|t| t.source == DataSource::PiSession)
+            .expect("pi breakdown");
+        assert_eq!(pi_tool.totals.input, 100);
+        let hit = opencode.last_quota_hit.as_ref().expect("last quota hit");
+        assert_eq!(hit.period.as_deref(), Some("5h"));
+        let sources: Vec<(&str, bool)> = opencode
+            .sources
+            .iter()
+            .map(|s| (s.collector_id.as_str(), s.stale))
+            .collect();
+        assert_eq!(sources, vec![("opencode-db", true), ("pi-sessions", false)]);
+
+        let other = &status.subscriptions[3];
+        assert_eq!(other.today.input, 0);
+        assert_eq!(other.last_7d.input, 7);
+        assert_eq!(other.today.cost_usd, Some(0.0));
+        assert_eq!(other.today.cost_source, CostSource::Reported);
     }
 
     #[tokio::test]

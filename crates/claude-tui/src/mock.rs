@@ -16,6 +16,8 @@ pub fn mock_status() -> StatusResponse {
         cost_today_usd: 3.47,
         budget_pct: Some(0.67),
         collector_status: CollectorStatus::Log,
+        // Demo subscription cards land with the Overview tab (AC-11).
+        subscriptions: Vec::new(),
     }
 }
 

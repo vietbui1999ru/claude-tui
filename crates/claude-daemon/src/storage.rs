@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use claude_common::protocol::{
-    ModelStats, ModelsCompareParams, ModelsCompareResponse, SessionsListParams,
-    SessionsListResponse, UsageQueryParams, UsageQueryResponse, UsageSummaryParams,
-    UsageSummaryResponse,
+    ModelStats, ModelsCompareParams, ModelsCompareResponse, QuotaHitStatus, QuotaWindow,
+    SessionsListParams, SessionsListResponse, SourceStatus, SubscriptionStatus, TokenTotals,
+    ToolBreakdown, UsageQueryParams, UsageQueryResponse, UsageSummaryParams, UsageSummaryResponse,
 };
 use claude_common::{
     ActiveSession, BudgetConfig, CostSource, DailyAggregate, DataSource, ModelType, Provider,
@@ -895,6 +896,233 @@ impl Storage {
         Ok(cost)
     }
 
+    // --- Per-subscription status ---
+    //
+    // AC-9. Every aggregate runs in SQLite, so building a status response never
+    // loads usage rows into memory.
+
+    /// Per-subscription status for the `status` RPC.
+    ///
+    /// The result always carries `claude`, `chatgpt` and `opencode-go`, in that
+    /// order, and then `other` when anything was recorded for it. `today` is
+    /// the local calendar day; `last_7d` covers the local days from six days
+    /// before today. A source or quota window with no update in 24 hours is
+    /// stale (SPEC Boundaries).
+    pub fn subscription_statuses(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<SubscriptionStatus>, StorageError> {
+        let today_start = local_day_start(now, 0);
+        let tomorrow_start = local_day_start(now, 1);
+        let week_start = local_day_start(now, -6);
+
+        let aggregates = StatusAggregates {
+            today: self.window_totals(today_start, tomorrow_start)?,
+            week: self.window_totals(week_start, tomorrow_start)?,
+            week_tools: self.tool_breakdown(week_start, tomorrow_start)?,
+            source_updates: self.source_updates()?,
+        };
+
+        let mut statuses = Vec::with_capacity(4);
+        for subscription in [
+            Subscription::Claude,
+            Subscription::ChatGpt,
+            Subscription::OpencodeGo,
+        ] {
+            statuses.push(self.status_for(subscription, now, &aggregates)?);
+        }
+
+        let other_has_data = aggregates.has_data(Subscription::Other)
+            || self.latest_quota_hit(Subscription::Other)?.is_some();
+        if other_has_data {
+            statuses.push(self.status_for(Subscription::Other, now, &aggregates)?);
+        }
+
+        Ok(statuses)
+    }
+
+    /// One subscription's status, from the aggregates of one
+    /// [`Self::subscription_statuses`] call.
+    fn status_for(
+        &self,
+        subscription: Subscription,
+        now: DateTime<Utc>,
+        aggregates: &StatusAggregates,
+    ) -> Result<SubscriptionStatus, StorageError> {
+        let quota = self
+            .latest_quota(subscription)?
+            .into_iter()
+            .map(|snapshot| QuotaWindow {
+                stale: is_stale(snapshot.observed_at, now),
+                expired: snapshot.resets_at.is_some_and(|resets_at| resets_at < now),
+                window: snapshot.window,
+                used_pct: snapshot.used_pct,
+                resets_at: snapshot.resets_at,
+                source: snapshot.source,
+                observed_at: snapshot.observed_at,
+            })
+            .collect();
+
+        let sources = aggregates
+            .source_updates
+            .get(&subscription)
+            .map(|updates| {
+                updates
+                    .iter()
+                    .map(|(source, last_update)| SourceStatus {
+                        collector_id: collector_id_for(*source).to_string(),
+                        last_update: Some(*last_update),
+                        stale: is_stale(*last_update, now),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let last_quota_hit = self
+            .latest_quota_hit(subscription)?
+            .map(|hit| QuotaHitStatus {
+                period: hit.period,
+                reset_at: hit.reset_at,
+                observed_at: hit.observed_at,
+            });
+
+        Ok(SubscriptionStatus {
+            subscription,
+            quota,
+            today: aggregates
+                .today
+                .get(&subscription)
+                .cloned()
+                .unwrap_or_else(TokenTotals::empty),
+            last_7d: aggregates
+                .week
+                .get(&subscription)
+                .cloned()
+                .unwrap_or_else(TokenTotals::empty),
+            by_tool: aggregates
+                .week_tools
+                .get(&subscription)
+                .cloned()
+                .unwrap_or_default(),
+            last_quota_hit,
+            sources,
+        })
+    }
+
+    /// Token and cost totals per subscription between `start` (inclusive) and
+    /// `end` (exclusive).
+    fn window_totals(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<HashMap<Subscription, TokenTotals>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT subscription,\n                        COALESCE(SUM(input_tokens), 0),\n                        COALESCE(SUM(output_tokens), 0),\n                        COALESCE(SUM(cache_read_tokens), 0),\n                        COALESCE(SUM(cache_write_tokens), 0),\n                        SUM(cost_usd),\n                        SUM(CASE WHEN cost_source = 'computed' THEN 1 ELSE 0 END),\n                        SUM(CASE WHEN cost_source = 'unknown' THEN 1 ELSE 0 END)\n                 FROM usage_records\n                 WHERE timestamp >= ?1 AND timestamp < ?2\n                 GROUP BY subscription",
+            )
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![start.to_rfc3339(), end.to_rfc3339()], |row| {
+                let subscription_str: String = row.get(0)?;
+                Ok((
+                    subscription_str.parse().unwrap_or(Subscription::Other),
+                    row_to_token_totals(row, 1)?,
+                ))
+            })
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+
+        let mut totals = HashMap::new();
+        for row in rows {
+            let (subscription, totals_for_window) =
+                row.map_err(|e| StorageError::Query(e.to_string()))?;
+            totals.insert(subscription, totals_for_window);
+        }
+        Ok(totals)
+    }
+
+    /// Per provider/source totals per subscription between `start` and `end`,
+    /// ordered by provider and source inside each subscription.
+    fn tool_breakdown(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<HashMap<Subscription, Vec<ToolBreakdown>>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT subscription, provider, source,\n                        COALESCE(SUM(input_tokens), 0),\n                        COALESCE(SUM(output_tokens), 0),\n                        COALESCE(SUM(cache_read_tokens), 0),\n                        COALESCE(SUM(cache_write_tokens), 0),\n                        SUM(cost_usd),\n                        SUM(CASE WHEN cost_source = 'computed' THEN 1 ELSE 0 END),\n                        SUM(CASE WHEN cost_source = 'unknown' THEN 1 ELSE 0 END)\n                 FROM usage_records\n                 WHERE timestamp >= ?1 AND timestamp < ?2\n                 GROUP BY subscription, provider, source\n                 ORDER BY subscription, provider, source",
+            )
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![start.to_rfc3339(), end.to_rfc3339()], |row| {
+                let subscription_str: String = row.get(0)?;
+                let provider_str: String = row.get(1)?;
+                let source_str: String = row.get(2)?;
+                Ok((
+                    subscription_str.parse().unwrap_or(Subscription::Other),
+                    ToolBreakdown {
+                        provider: provider_str.parse().unwrap_or(Provider::Other),
+                        source: source_str.parse().unwrap_or(DataSource::Log),
+                        totals: row_to_token_totals(row, 3)?,
+                    },
+                ))
+            })
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+
+        let mut breakdown: HashMap<Subscription, Vec<ToolBreakdown>> = HashMap::new();
+        for row in rows {
+            let (subscription, tool) = row.map_err(|e| StorageError::Query(e.to_string()))?;
+            breakdown.entry(subscription).or_default().push(tool);
+        }
+        Ok(breakdown)
+    }
+
+    /// The newest usage record and quota snapshot per source, per
+    /// subscription, ordered by source. A source with nothing stored is not
+    /// listed.
+    fn source_updates(&self) -> Result<SourceUpdates, StorageError> {
+        let mut newest: HashMap<(Subscription, DataSource), DateTime<Utc>> = HashMap::new();
+
+        for sql in [
+            "SELECT subscription, source, MAX(timestamp) FROM usage_records \
+             GROUP BY subscription, source",
+            "SELECT subscription, source, MAX(observed_at) FROM quota_snapshots \
+             GROUP BY subscription, source",
+        ] {
+            let mut stmt = self
+                .conn
+                .prepare(sql)
+                .map_err(|e| StorageError::Query(e.to_string()))?;
+            let rows = stmt
+                .query_map([], row_to_source_update)
+                .map_err(|e| StorageError::Query(e.to_string()))?;
+            for row in rows {
+                let (subscription, source, at) =
+                    row.map_err(|e| StorageError::Query(e.to_string()))?;
+                newest
+                    .entry((subscription, source))
+                    .and_modify(|current| {
+                        if at > *current {
+                            *current = at;
+                        }
+                    })
+                    .or_insert(at);
+            }
+        }
+
+        let mut updates: SourceUpdates = HashMap::new();
+        for ((subscription, source), at) in newest {
+            updates.entry(subscription).or_default().push((source, at));
+        }
+        for sources in updates.values_mut() {
+            sources.sort_by_key(|(source, _)| collector_id_for(*source));
+        }
+        Ok(updates)
+    }
+
     pub fn get_model_stats(
         &self,
         params: &ModelsCompareParams,
@@ -963,6 +1191,111 @@ impl Storage {
 
         Ok(ModelsCompareResponse { models })
     }
+}
+
+/// A source with no update in this many hours is stale (SPEC Boundaries).
+const STALE_AFTER_HOURS: i64 = 24;
+
+/// Newest update per source, per subscription.
+type SourceUpdates = HashMap<Subscription, Vec<(DataSource, DateTime<Utc>)>>;
+
+/// The aggregates of one `subscription_statuses` call, computed once and then
+/// read for each subscription.
+struct StatusAggregates {
+    today: HashMap<Subscription, TokenTotals>,
+    week: HashMap<Subscription, TokenTotals>,
+    week_tools: HashMap<Subscription, Vec<ToolBreakdown>>,
+    /// Newest record or snapshot per source, per subscription.
+    source_updates: SourceUpdates,
+}
+
+impl StatusAggregates {
+    /// Whether anything at all was collected for a subscription.
+    fn has_data(&self, subscription: Subscription) -> bool {
+        self.today.contains_key(&subscription)
+            || self.week.contains_key(&subscription)
+            || self.week_tools.contains_key(&subscription)
+            || self.source_updates.contains_key(&subscription)
+    }
+}
+
+/// A source or quota window with no update in 24 hours is stale.
+fn is_stale(observed_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now.signed_duration_since(observed_at) > chrono::Duration::hours(STALE_AFTER_HOURS)
+}
+
+/// Midnight local time `offset_days` from `now`, as UTC. "Today" is the local
+/// calendar day (SPEC AC-9), not the UTC one.
+fn local_day_start(now: DateTime<Utc>, offset_days: i64) -> DateTime<Utc> {
+    use chrono::{Local, TimeZone};
+
+    let date = now.with_timezone(&Local).date_naive() + chrono::Duration::days(offset_days);
+    date.and_hms_opt(0, 0, 0)
+        .and_then(|midnight| Local.from_local_datetime(&midnight).earliest())
+        .map(|start| start.with_timezone(&Utc))
+        .unwrap_or(now)
+}
+
+/// The collector that writes each source, named in a status response.
+fn collector_id_for(source: DataSource) -> &'static str {
+    match source {
+        DataSource::Log => crate::collectors::claude::COLLECTOR_ID,
+        DataSource::ClaudeQuota => crate::collectors::claude_quota::COLLECTOR_ID,
+        DataSource::CodexRollout => crate::collectors::codex::COLLECTOR_ID,
+        DataSource::PiSession => crate::collectors::pi::COLLECTOR_ID,
+        DataSource::OpencodeDb => crate::collectors::opencode::COLLECTOR_ID,
+    }
+}
+
+/// Read the seven aggregate columns starting at `base`: the four token sums,
+/// the cost sum, the computed count and the unknown count.
+fn row_to_token_totals(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<TokenTotals> {
+    let input: i64 = row.get(base)?;
+    let output: i64 = row.get(base + 1)?;
+    let cache_read: i64 = row.get(base + 2)?;
+    let cache_write: i64 = row.get(base + 3)?;
+    let cost_usd: Option<f64> = row.get(base + 4)?;
+    let computed: i64 = row.get(base + 5)?;
+    let unknown: i64 = row.get(base + 6)?;
+
+    // SPEC AC-9 states the rules in this order: any computed part wins, then
+    // any unknown part, otherwise every part was reported by the provider.
+    let cost_source = if computed > 0 {
+        CostSource::Computed
+    } else if unknown > 0 {
+        CostSource::Unknown
+    } else {
+        CostSource::Reported
+    };
+
+    Ok(TokenTotals {
+        input: input.max(0) as u64,
+        output: output.max(0) as u64,
+        cache_read: cache_read.max(0) as u64,
+        cache_write: cache_write.max(0) as u64,
+        // Collectors fold reasoning into `output_tokens`, so it cannot be
+        // counted again here; see `TokenTotals::reasoning`.
+        reasoning: 0,
+        cost_usd,
+        cost_source,
+    })
+}
+
+/// Read a `(subscription, source, newest timestamp)` aggregate row. An
+/// unrecognised label becomes the unknown variant, as in
+/// [`row_to_usage_record`], so one odd row cannot fail the whole response.
+fn row_to_source_update(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(Subscription, DataSource, DateTime<Utc>)> {
+    let subscription_str: String = row.get(0)?;
+    let source_str: String = row.get(1)?;
+    let timestamp: String = row.get(2)?;
+
+    Ok((
+        subscription_str.parse().unwrap_or(Subscription::Other),
+        source_str.parse().unwrap_or(DataSource::Log),
+        parse_rfc3339(&timestamp, 2)?,
+    ))
 }
 
 fn insert_usage_row(conn: &Connection, record: &UsageRecord) -> Result<usize, rusqlite::Error> {
@@ -1799,6 +2132,89 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn status_rpc_subscriptions_cost_source_rules() {
+        let mut storage = test_storage();
+        let now = Utc::now();
+
+        let mut computed = make_record(ModelType::Sonnet, 100, 10);
+        computed.cost_usd = Some(0.5);
+        computed.cost_source = CostSource::Computed;
+
+        // Same subscription, one record with no configured price: the rule the
+        // SPEC states first (any computed part) wins, and the sum covers the
+        // known parts only.
+        let mut unpriced = make_record(ModelType::Haiku, 7, 3);
+        unpriced.uuid = Uuid::new_v4();
+        unpriced.dedup_key = unpriced.uuid.to_string();
+        unpriced.cost_usd = None;
+        unpriced.cost_source = CostSource::Unknown;
+
+        let mut reported = make_record(ModelType::Sonnet, 20, 2);
+        reported.uuid = Uuid::new_v4();
+        reported.dedup_key = reported.uuid.to_string();
+        reported.provider = Provider::OpenAiCodex;
+        reported.subscription = Subscription::ChatGpt;
+        reported.source = DataSource::CodexRollout;
+        reported.cost_usd = Some(0.25);
+        reported.cost_source = CostSource::Reported;
+
+        let mut all_unknown = make_record(ModelType::Opus, 5, 1);
+        all_unknown.uuid = Uuid::new_v4();
+        all_unknown.dedup_key = all_unknown.uuid.to_string();
+        all_unknown.provider = Provider::OpencodeGo;
+        all_unknown.subscription = Subscription::OpencodeGo;
+        all_unknown.source = DataSource::OpencodeDb;
+        all_unknown.cost_usd = None;
+        all_unknown.cost_source = CostSource::Unknown;
+
+        storage
+            .insert_usage_batch(&[computed, unpriced, reported, all_unknown])
+            .unwrap();
+
+        let statuses = storage.subscription_statuses(now).unwrap();
+        assert_eq!(statuses.len(), 3, "no `other` card without `other` data");
+
+        let claude = &statuses[0];
+        assert_eq!(claude.subscription, Subscription::Claude);
+        assert_eq!(claude.today.cost_source, CostSource::Computed);
+        assert_eq!(claude.today.cost_usd, Some(0.5));
+        assert_eq!(claude.today.input, 107);
+
+        let chatgpt = &statuses[1];
+        assert_eq!(chatgpt.today.cost_source, CostSource::Reported);
+        assert_eq!(chatgpt.today.cost_usd, Some(0.25));
+
+        let opencode = &statuses[2];
+        assert_eq!(opencode.today.cost_source, CostSource::Unknown);
+        assert_eq!(opencode.today.cost_usd, None);
+    }
+
+    #[test]
+    fn status_rpc_subscriptions_today_is_the_local_day() {
+        let now = Utc::now();
+        let today_start = local_day_start(now, 0);
+        let tomorrow_start = local_day_start(now, 1);
+        assert!(today_start <= now, "today starts at or before now");
+        assert!(tomorrow_start > now, "tomorrow starts after now");
+        let week_start = local_day_start(now, -6);
+        assert_eq!(
+            today_start.signed_duration_since(week_start),
+            chrono::Duration::days(6)
+        );
+        assert_eq!(
+            today_start.with_timezone(&chrono::Local).time(),
+            chrono::NaiveTime::MIN
+        );
+    }
+
+    #[test]
+    fn status_rpc_subscriptions_stale_after_24h() {
+        let now = Utc::now();
+        assert!(!is_stale(now - chrono::Duration::hours(23), now));
+        assert!(is_stale(now - chrono::Duration::hours(25), now));
     }
 
     #[test]
