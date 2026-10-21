@@ -1,8 +1,10 @@
+pub mod config;
 pub mod errors;
 pub mod models;
 pub mod paths;
 pub mod protocol;
 
+pub use config::*;
 pub use errors::*;
 pub use models::*;
 pub use paths::*;

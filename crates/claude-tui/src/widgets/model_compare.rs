@@ -43,9 +43,8 @@ fn render_comparison_table(frame: &mut Frame, area: Rect, models: &[ModelStats])
             Row::new(vec![
                 Cell::from(s.model.to_string()).style(Style::new().fg(color)),
                 Cell::from(format_tokens_comma(total_tokens)),
-                Cell::from(format!(
-                    "{}",
-                    format_tokens_comma(s.avg_input_per_request as u64 + s.avg_output_per_request as u64)
+                Cell::from(format_tokens_comma(
+                    s.avg_input_per_request as u64 + s.avg_output_per_request as u64,
                 )),
                 Cell::from(format!("${:.2}", s.total_cost_usd)),
                 Cell::from(format!("${:.3}", s.avg_cost_per_request)),
@@ -129,7 +128,9 @@ fn render_token_breakdown(frame: &mut Frame, area: Rect, models: &[ModelStats]) 
                 Cell::from(s.model.to_string()).style(Style::new().fg(color)),
                 Cell::from(format_tokens_comma(s.total_input_tokens)),
                 Cell::from(format_tokens_comma(s.total_output_tokens)),
-                Cell::from(format_tokens_comma(s.total_input_tokens + s.total_output_tokens)),
+                Cell::from(format_tokens_comma(
+                    s.total_input_tokens + s.total_output_tokens,
+                )),
             ])
         })
         .collect();

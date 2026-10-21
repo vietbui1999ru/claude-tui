@@ -22,3 +22,6 @@ rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 notify = { version = "7.0", features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.5"
 directories = "6.0"
+# Already a direct dependency of claude-common and in the lockfile: the IPC
+# bind needs one `umask` call (AC-12).
+libc = "0.2"

@@ -48,10 +48,13 @@ pub fn budget_color(pct: f64) -> Color {
     }
 }
 
-pub fn model_color(model: &claude_common::ModelType) -> Color {
-    match model {
-        claude_common::ModelType::Opus => COLOR_OPUS,
-        claude_common::ModelType::Sonnet => COLOR_SONNET,
-        claude_common::ModelType::Haiku => COLOR_HAIKU,
+pub fn model_color(model: &str) -> Color {
+    let model = model.to_lowercase();
+    if model.contains("opus") {
+        COLOR_OPUS
+    } else if model.contains("haiku") {
+        COLOR_HAIKU
+    } else {
+        COLOR_SONNET
     }
 }

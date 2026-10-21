@@ -1,8 +1,14 @@
 use chrono::Utc;
 use claude_common::{
-    ActiveSession, BudgetConfig, CollectorStatus, DailyAggregate, ModelStats, ModelType,
-    ModelsCompareResponse, SessionStatus, StatusResponse, UsageSummaryResponse,
+    ActiveSession, BudgetConfig, CollectorStatus, CostSource, DailyAggregate, DataSource,
+    ModelStats, ModelType, ModelsCompareResponse, PriceBook, QuotaHitStatus, QuotaWindow,
+    SessionStatus, SourceStatus, StatusResponse, Subscription, SubscriptionStatus, TokenTotals,
+    UsageSummaryResponse,
 };
+
+const DEMO_OPUS: &str = "claude-opus-5-5";
+const DEMO_SONNET: &str = "claude-sonnet-5-5";
+const DEMO_HAIKU: &str = "claude-haiku-5-5";
 
 pub fn mock_status() -> StatusResponse {
     StatusResponse {
@@ -12,6 +18,124 @@ pub fn mock_status() -> StatusResponse {
         cost_today_usd: 3.47,
         budget_pct: Some(0.67),
         collector_status: CollectorStatus::Log,
+        subscriptions: mock_subscriptions(),
+    }
+}
+
+/// Demo cards for the Overview tab. Only shown with `--demo` (AC-11).
+pub fn mock_subscriptions() -> Vec<SubscriptionStatus> {
+    let now = Utc::now();
+    let stale_now = now - chrono::Duration::days(2);
+
+    let claude = SubscriptionStatus {
+        subscription: Subscription::Claude,
+        quota: vec![
+            QuotaWindow {
+                window: "five_hour".to_string(),
+                used_pct: Some(34.0),
+                resets_at: Some(now + chrono::Duration::minutes(95)),
+                source: DataSource::ClaudeQuota,
+                observed_at: now,
+                stale: false,
+                expired: false,
+            },
+            QuotaWindow {
+                window: "seven_day".to_string(),
+                used_pct: Some(12.0),
+                resets_at: Some(now + chrono::Duration::days(4)),
+                source: DataSource::ClaudeQuota,
+                observed_at: now,
+                stale: false,
+                expired: false,
+            },
+        ],
+        today: mock_totals(1_240_000, 310_000, 9.10, CostSource::Computed),
+        last_7d: mock_totals(8_400_000, 2_100_000, 61.40, CostSource::Computed),
+        by_tool: Vec::new(),
+        last_quota_hit: None,
+        sources: vec![
+            mock_source("claude-logs", Some(now), false),
+            mock_source("claude-quota", Some(now), false),
+        ],
+    };
+
+    let chatgpt = SubscriptionStatus {
+        subscription: Subscription::ChatGpt,
+        quota: vec![
+            QuotaWindow {
+                window: "primary".to_string(),
+                used_pct: Some(3.0),
+                resets_at: Some(now + chrono::Duration::hours(5)),
+                source: DataSource::CodexRollout,
+                observed_at: now,
+                stale: false,
+                expired: false,
+            },
+            QuotaWindow {
+                window: "secondary".to_string(),
+                used_pct: Some(8.0),
+                resets_at: Some(now + chrono::Duration::days(5)),
+                source: DataSource::CodexRollout,
+                observed_at: now,
+                stale: false,
+                expired: false,
+            },
+        ],
+        today: mock_totals(640_000, 155_000, 2.80, CostSource::Computed),
+        last_7d: mock_totals(3_900_000, 980_000, 17.60, CostSource::Computed),
+        by_tool: Vec::new(),
+        last_quota_hit: None,
+        sources: vec![
+            mock_source("codex-rollouts", Some(now), false),
+            mock_source(
+                "pi-sessions",
+                Some(now - chrono::Duration::minutes(12)),
+                false,
+            ),
+        ],
+    };
+
+    let opencode_go = SubscriptionStatus {
+        subscription: Subscription::OpencodeGo,
+        quota: Vec::new(),
+        today: mock_totals(410_000, 96_000, 3.20, CostSource::Reported),
+        last_7d: mock_totals(2_100_000, 520_000, 13.40, CostSource::Reported),
+        by_tool: Vec::new(),
+        last_quota_hit: Some(QuotaHitStatus {
+            period: Some("5h".to_string()),
+            reset_at: Some(now + chrono::Duration::hours(2)),
+            observed_at: now - chrono::Duration::minutes(40),
+        }),
+        sources: vec![
+            mock_source("pi-sessions", Some(now), false),
+            mock_source("opencode-db", Some(stale_now), true),
+        ],
+    };
+
+    vec![claude, chatgpt, opencode_go]
+}
+
+fn mock_totals(input: u64, output: u64, cost_usd: f64, cost_source: CostSource) -> TokenTotals {
+    TokenTotals {
+        input,
+        output,
+        cache_read: input / 4,
+        cache_write: input / 20,
+        reasoning: 0,
+        cost_usd: Some(cost_usd),
+        cost_source,
+    }
+}
+
+fn mock_source(
+    collector_id: &str,
+    last_update: Option<chrono::DateTime<Utc>>,
+    stale: bool,
+) -> SourceStatus {
+    SourceStatus {
+        collector_id: collector_id.to_string(),
+        last_update,
+        stale,
     }
 }
 
@@ -29,36 +153,40 @@ pub fn mock_daily_aggregates() -> Vec<DailyAggregate> {
     let mut aggs = Vec::new();
 
     let data = [
-        (-6, ModelType::Sonnet, 45_000, 18_000, 12_000, 3_000),
-        (-6, ModelType::Opus, 12_000, 5_000, 4_000, 1_000),
-        (-5, ModelType::Sonnet, 82_000, 35_000, 25_000, 6_000),
-        (-5, ModelType::Haiku, 30_000, 10_000, 8_000, 2_000),
-        (-4, ModelType::Opus, 95_000, 42_000, 30_000, 8_000),
-        (-4, ModelType::Sonnet, 110_000, 48_000, 35_000, 9_000),
-        (-3, ModelType::Sonnet, 75_000, 32_000, 22_000, 5_000),
-        (-3, ModelType::Opus, 68_000, 28_000, 20_000, 5_000),
-        (-2, ModelType::Sonnet, 130_000, 55_000, 40_000, 10_000),
-        (-2, ModelType::Haiku, 45_000, 18_000, 12_000, 3_000),
-        (-1, ModelType::Sonnet, 98_000, 40_000, 30_000, 7_000),
-        (-1, ModelType::Opus, 55_000, 22_000, 16_000, 4_000),
-        (0, ModelType::Sonnet, 65_000, 28_000, 20_000, 5_000),
-        (0, ModelType::Opus, 35_000, 15_000, 10_000, 3_000),
-        (0, ModelType::Haiku, 20_000, 8_000, 6_000, 1_500),
+        (-6, DEMO_SONNET, 45_000, 18_000, 12_000, 3_000),
+        (-6, DEMO_OPUS, 12_000, 5_000, 4_000, 1_000),
+        (-5, DEMO_SONNET, 82_000, 35_000, 25_000, 6_000),
+        (-5, DEMO_HAIKU, 30_000, 10_000, 8_000, 2_000),
+        (-4, DEMO_OPUS, 95_000, 42_000, 30_000, 8_000),
+        (-4, DEMO_SONNET, 110_000, 48_000, 35_000, 9_000),
+        (-3, DEMO_SONNET, 75_000, 32_000, 22_000, 5_000),
+        (-3, DEMO_OPUS, 68_000, 28_000, 20_000, 5_000),
+        (-2, DEMO_SONNET, 130_000, 55_000, 40_000, 10_000),
+        (-2, DEMO_HAIKU, 45_000, 18_000, 12_000, 3_000),
+        (-1, DEMO_SONNET, 98_000, 40_000, 30_000, 7_000),
+        (-1, DEMO_OPUS, 55_000, 22_000, 16_000, 4_000),
+        (0, DEMO_SONNET, 65_000, 28_000, 20_000, 5_000),
+        (0, DEMO_OPUS, 35_000, 15_000, 10_000, 3_000),
+        (0, DEMO_HAIKU, 20_000, 8_000, 6_000, 1_500),
     ];
+
+    let price_book = PriceBook::embedded().unwrap_or_default();
 
     for (offset, model, input, output, cache_r, cache_w) in data {
         let date = today + chrono::Duration::days(offset);
-        let cost = model.compute_cost(input, output, cache_r, cache_w);
+        let cost = price_book
+            .cost(model, input, output, cache_r, cache_w)
+            .unwrap_or(0.0);
         aggs.push(DailyAggregate {
             date,
-            model,
+            model: model.to_string(),
             total_input_tokens: input,
             total_output_tokens: output,
             total_cache_read_tokens: cache_r,
             total_cache_write_tokens: cache_w,
             total_cost_usd: cost,
-            request_count: (input / 5000) as u64,
-            session_count: (input / 20000) as u64,
+            request_count: input / 5000,
+            session_count: input / 20000,
         });
     }
 
@@ -133,7 +261,7 @@ pub fn mock_model_stats() -> ModelsCompareResponse {
     ModelsCompareResponse {
         models: vec![
             ModelStats {
-                model: ModelType::Opus,
+                model: DEMO_OPUS.to_string(),
                 total_input_tokens: 1_245_000,
                 total_output_tokens: 310_000,
                 total_cost_usd: 67.20,
@@ -143,7 +271,7 @@ pub fn mock_model_stats() -> ModelsCompareResponse {
                 avg_cost_per_request: 1.527,
             },
             ModelStats {
-                model: ModelType::Sonnet,
+                model: DEMO_SONNET.to_string(),
                 total_input_tokens: 2_890_000,
                 total_output_tokens: 640_000,
                 total_cost_usd: 41.50,
@@ -153,7 +281,7 @@ pub fn mock_model_stats() -> ModelsCompareResponse {
                 avg_cost_per_request: 0.174,
             },
             ModelStats {
-                model: ModelType::Haiku,
+                model: DEMO_HAIKU.to_string(),
                 total_input_tokens: 4_120_000,
                 total_output_tokens: 980_000,
                 total_cost_usd: 20.30,
@@ -168,7 +296,7 @@ pub fn mock_model_stats() -> ModelsCompareResponse {
 
 pub struct MockProjectCost {
     pub project: String,
-    pub model: ModelType,
+    pub model: String,
     pub cost: f64,
     pub pct: f64,
 }
@@ -177,31 +305,31 @@ pub fn mock_project_costs() -> Vec<MockProjectCost> {
     vec![
         MockProjectCost {
             project: "ml-pipeline".to_string(),
-            model: ModelType::Opus,
+            model: DEMO_OPUS.to_string(),
             cost: 45.20,
             pct: 0.35,
         },
         MockProjectCost {
             project: "claude-tui".to_string(),
-            model: ModelType::Sonnet,
+            model: DEMO_SONNET.to_string(),
             cost: 18.40,
             pct: 0.14,
         },
         MockProjectCost {
             project: "docs-generator".to_string(),
-            model: ModelType::Sonnet,
+            model: DEMO_SONNET.to_string(),
             cost: 12.80,
             pct: 0.10,
         },
         MockProjectCost {
             project: "code-review".to_string(),
-            model: ModelType::Haiku,
+            model: DEMO_HAIKU.to_string(),
             cost: 8.50,
             pct: 0.07,
         },
         MockProjectCost {
             project: "(other)".to_string(),
-            model: ModelType::Sonnet,
+            model: DEMO_SONNET.to_string(),
             cost: 44.10,
             pct: 0.34,
         },

@@ -1,8 +1,9 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::models::{
-    ActiveSession, BudgetConfig, DailyAggregate, ModelType, SessionStatus, TimeRange, TimeWindow,
-    UsageRecord,
+    ActiveSession, BudgetConfig, CostSource, DailyAggregate, DataSource, ModelType, Provider,
+    SessionStatus, Subscription, TimeRange, TimeWindow, UsageRecord,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +63,13 @@ pub const COLLECTOR_UNAVAILABLE: i32 = -1;
 pub const STORAGE_ERROR: i32 = -2;
 pub const NOT_FOUND: i32 = -3;
 
+/// Longest request or response line either end of the socket will accept,
+/// excluding the terminating newline.
+///
+/// Both sides apply the same cap through a limited read, so an over-long line
+/// is rejected without being buffered (AC-12, finding V4 and W8).
+pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
+
 // --- Status ---
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -79,6 +87,103 @@ pub struct StatusResponse {
     pub cost_today_usd: f64,
     pub budget_pct: Option<f64>,
     pub collector_status: CollectorStatus,
+    /// Per-subscription usage, quota and freshness (AC-9). Empty when the
+    /// storage query fails, so an old client still gets a usable answer.
+    #[serde(default)]
+    pub subscriptions: Vec<SubscriptionStatus>,
+}
+
+/// Token and cost totals for one subscription over one window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenTotals {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    /// Reasoning tokens. The collectors fold reasoning into `output`, so this
+    /// is 0 until a storage column separates them.
+    pub reasoning: u64,
+    /// USD over the records whose cost is known. `None` when every record in
+    /// the window has an unknown cost.
+    pub cost_usd: Option<f64>,
+    /// The rules are evaluated in the order SPEC AC-9 states them: `Computed`
+    /// if any part was computed, then `Unknown` if any part is unknown, else
+    /// `Reported`.
+    pub cost_source: CostSource,
+}
+
+impl TokenTotals {
+    /// Totals for a window with no records: no tokens, no cost, nothing
+    /// computed and nothing unknown.
+    pub fn empty() -> Self {
+        Self {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+            cost_usd: Some(0.0),
+            cost_source: CostSource::Reported,
+        }
+    }
+}
+
+/// One quota window as the daemon last observed it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaWindow {
+    /// Window name as the provider reports it, e.g. `five_hour` or `primary`.
+    pub window: String,
+    pub used_pct: Option<f64>,
+    pub resets_at: Option<DateTime<Utc>>,
+    pub source: DataSource,
+    pub observed_at: DateTime<Utc>,
+    /// No observation of this window in the last 24 hours.
+    pub stale: bool,
+    /// The window's reset time is in the past.
+    pub expired: bool,
+}
+
+/// Usage from one provider/source pair, so the two tools sharing a plan stay
+/// distinguishable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolBreakdown {
+    pub provider: Provider,
+    pub source: DataSource,
+    pub totals: TokenTotals,
+}
+
+/// The latest provider quota-limit event for a subscription.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaHitStatus {
+    pub period: Option<String>,
+    pub reset_at: Option<DateTime<Utc>>,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Freshness of one collector feeding a subscription.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceStatus {
+    pub collector_id: String,
+    /// The newest record or snapshot this collector stored. `None` when it has
+    /// stored nothing yet.
+    pub last_update: Option<DateTime<Utc>>,
+    pub stale: bool,
+}
+
+/// Everything the dashboard shows for one subscription.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionStatus {
+    pub subscription: Subscription,
+    /// Newest snapshot per window, in window-name order.
+    pub quota: Vec<QuotaWindow>,
+    /// The local calendar day.
+    pub today: TokenTotals,
+    /// The local calendar days from six days before today through today.
+    pub last_7d: TokenTotals,
+    /// Provider/source breakdown over the same seven days.
+    pub by_tool: Vec<ToolBreakdown>,
+    pub last_quota_hit: Option<QuotaHitStatus>,
+    pub sources: Vec<SourceStatus>,
 }
 
 // --- usage.query ---
@@ -174,7 +279,8 @@ pub struct ModelsCompareResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelStats {
-    pub model: ModelType,
+    /// Model id as the source reports it, e.g. `claude-opus-5-5`.
+    pub model: String,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cost_usd: f64,
@@ -314,11 +420,81 @@ mod tests {
             cost_today_usd: 3.47,
             budget_pct: Some(0.67),
             collector_status: CollectorStatus::Log,
+            subscriptions: vec![],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StatusResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.active_sessions, 2);
         assert_eq!(parsed.current_model, Some(ModelType::Sonnet));
+    }
+
+    #[test]
+    fn test_status_response_parses_without_subscriptions() {
+        // An older daemon sends the fields it had then; the new client must
+        // still parse it and see an empty subscription list.
+        let json = r#"{"daemon_uptime_secs":10,"active_sessions":0,
+            "current_model":null,"cost_today_usd":0.0,"budget_pct":null,
+            "collector_status":"log"}"#;
+        let parsed: StatusResponse = serde_json::from_str(json).unwrap();
+        assert!(parsed.subscriptions.is_empty());
+        assert!(matches!(parsed.collector_status, CollectorStatus::Log));
+    }
+
+    #[test]
+    fn test_subscription_status_roundtrip() {
+        let now = chrono::Utc::now();
+        let status = SubscriptionStatus {
+            subscription: Subscription::Claude,
+            quota: vec![QuotaWindow {
+                window: "five_hour".to_string(),
+                used_pct: Some(34.0),
+                resets_at: Some(now),
+                source: DataSource::ClaudeQuota,
+                observed_at: now,
+                stale: false,
+                expired: false,
+            }],
+            today: TokenTotals {
+                input: 10,
+                output: 5,
+                cache_read: 2,
+                cache_write: 1,
+                reasoning: 0,
+                cost_usd: Some(0.5),
+                cost_source: CostSource::Computed,
+            },
+            last_7d: TokenTotals::empty(),
+            by_tool: vec![ToolBreakdown {
+                provider: Provider::Anthropic,
+                source: DataSource::Log,
+                totals: TokenTotals::empty(),
+            }],
+            last_quota_hit: Some(QuotaHitStatus {
+                period: Some("5h".to_string()),
+                reset_at: Some(now),
+                observed_at: now,
+            }),
+            sources: vec![SourceStatus {
+                collector_id: "claude-logs".to_string(),
+                last_update: Some(now),
+                stale: false,
+            }],
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let parsed: SubscriptionStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.subscription, Subscription::Claude);
+        assert_eq!(parsed.quota[0].window, "five_hour");
+        assert_eq!(parsed.today.input, 10);
+        assert_eq!(parsed.today.cost_source, CostSource::Computed);
+        assert_eq!(parsed.by_tool[0].provider, Provider::Anthropic);
+        assert_eq!(
+            parsed
+                .last_quota_hit
+                .as_ref()
+                .and_then(|h| h.period.as_deref()),
+            Some("5h")
+        );
+        assert_eq!(parsed.sources[0].collector_id, "claude-logs");
     }
 
     #[test]
@@ -412,7 +588,7 @@ mod tests {
     fn test_models_compare_response_roundtrip() {
         let resp = ModelsCompareResponse {
             models: vec![ModelStats {
-                model: ModelType::Opus,
+                model: "claude-opus-5-5".to_string(),
                 total_input_tokens: 1_000_000,
                 total_output_tokens: 500_000,
                 total_cost_usd: 52.5,
@@ -425,7 +601,7 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: ModelsCompareResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.models.len(), 1);
-        assert_eq!(parsed.models[0].model, ModelType::Opus);
+        assert_eq!(parsed.models[0].model, "claude-opus-5-5");
     }
 
     #[test]

@@ -68,7 +68,7 @@ fn render_model_bars(frame: &mut Frame, area: Rect, stats: &[ModelStats]) {
             let color = theme::model_color(&s.model);
             Bar::default()
                 .value(pct)
-                .label(Line::from(format!("{}", s.model)))
+                .label(Line::from(s.model.to_string()))
                 .style(Style::new().fg(color))
                 .text_value(format!("${:.2} ({}%)", s.total_cost_usd, pct))
         })
@@ -129,8 +129,7 @@ fn render_cumulative_sparkline(frame: &mut Frame, area: Rect, summary: &UsageSum
     let label = Paragraph::new(format!("Total: ${:.2}", cumulative))
         .style(Style::new().fg(theme::COLOR_PRIMARY));
 
-    let spark_layout =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    let spark_layout = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
     frame.render_widget(label, spark_layout[0]);
     frame.render_widget(sparkline, spark_layout[1]);
 }

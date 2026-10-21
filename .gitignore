@@ -9,3 +9,7 @@ target/
 # MSVC debugging
 *.pdb
 
+
+# Pi agent state and pi-lens probe logs (rewritten on every Pi start)
+.pi/
+.pi-lens-probe-home/

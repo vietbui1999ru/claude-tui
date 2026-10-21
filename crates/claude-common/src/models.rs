@@ -12,57 +12,6 @@ pub enum ModelType {
 }
 
 impl ModelType {
-    /// Price per million input tokens in USD.
-    pub fn input_price_per_m(&self) -> f64 {
-        match self {
-            ModelType::Opus => 15.0,
-            ModelType::Sonnet => 3.0,
-            ModelType::Haiku => 0.80,
-        }
-    }
-
-    /// Price per million output tokens in USD.
-    pub fn output_price_per_m(&self) -> f64 {
-        match self {
-            ModelType::Opus => 75.0,
-            ModelType::Sonnet => 15.0,
-            ModelType::Haiku => 4.0,
-        }
-    }
-
-    /// Price per million cache read tokens in USD.
-    pub fn cache_read_price_per_m(&self) -> f64 {
-        match self {
-            ModelType::Opus => 1.50,
-            ModelType::Sonnet => 0.30,
-            ModelType::Haiku => 0.08,
-        }
-    }
-
-    /// Price per million cache write tokens in USD.
-    pub fn cache_write_price_per_m(&self) -> f64 {
-        match self {
-            ModelType::Opus => 18.75,
-            ModelType::Sonnet => 3.75,
-            ModelType::Haiku => 1.0,
-        }
-    }
-
-    /// Compute cost for a given token breakdown.
-    pub fn compute_cost(
-        &self,
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_tokens: u64,
-        cache_write_tokens: u64,
-    ) -> f64 {
-        let input = input_tokens as f64 * self.input_price_per_m() / 1_000_000.0;
-        let output = output_tokens as f64 * self.output_price_per_m() / 1_000_000.0;
-        let cache_read = cache_read_tokens as f64 * self.cache_read_price_per_m() / 1_000_000.0;
-        let cache_write = cache_write_tokens as f64 * self.cache_write_price_per_m() / 1_000_000.0;
-        input + output + cache_read + cache_write
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             ModelType::Opus => "Opus",
@@ -114,10 +63,198 @@ impl fmt::Display for SessionStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Where a usage record was collected from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DataSource {
+    /// Claude Code conversation logs (`~/.claude/projects/**/*.jsonl`).
     Log,
+    /// Claude Code quota snapshot (statusline stdin JSON or `~/.claude.json`).
+    ClaudeQuota,
+    /// Codex CLI rollout files (`~/.codex/sessions/**/rollout-*.jsonl`).
+    CodexRollout,
+    /// Pi session files (`~/.pi/agent/sessions/**/*.jsonl`).
+    PiSession,
+    /// OpenCode's SQLite database.
+    OpencodeDb,
+}
+
+impl DataSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DataSource::Log => "log",
+            DataSource::ClaudeQuota => "claude-quota",
+            DataSource::CodexRollout => "codex-rollout",
+            DataSource::PiSession => "pi-session",
+            DataSource::OpencodeDb => "opencode-db",
+        }
+    }
+}
+
+impl fmt::Display for DataSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for DataSource {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "log" => Ok(DataSource::Log),
+            "claude-quota" => Ok(DataSource::ClaudeQuota),
+            "codex-rollout" => Ok(DataSource::CodexRollout),
+            "pi-session" => Ok(DataSource::PiSession),
+            "opencode-db" => Ok(DataSource::OpencodeDb),
+            other => Err(format!("unknown data source: {other}")),
+        }
+    }
+}
+
+/// The upstream model provider that billed a record's tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provider {
+    Anthropic,
+    #[serde(rename = "openai-codex")]
+    OpenAiCodex,
+    OpencodeGo,
+    /// Any provider this dashboard does not know about.
+    Other,
+}
+
+impl Provider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Provider::Anthropic => "anthropic",
+            Provider::OpenAiCodex => "openai-codex",
+            Provider::OpencodeGo => "opencode-go",
+            Provider::Other => "other",
+        }
+    }
+}
+
+impl fmt::Display for Provider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Provider {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "anthropic" => Ok(Provider::Anthropic),
+            "openai-codex" => Ok(Provider::OpenAiCodex),
+            "opencode-go" => Ok(Provider::OpencodeGo),
+            "other" => Ok(Provider::Other),
+            other => Err(format!("unknown provider: {other}")),
+        }
+    }
+}
+
+/// The subscription a record's usage counts against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Subscription {
+    Claude,
+    #[serde(rename = "chatgpt")]
+    ChatGpt,
+    OpencodeGo,
+    Other,
+}
+
+impl Subscription {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Subscription::Claude => "claude",
+            Subscription::ChatGpt => "chatgpt",
+            Subscription::OpencodeGo => "opencode-go",
+            Subscription::Other => "other",
+        }
+    }
+}
+
+impl fmt::Display for Subscription {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Subscription {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "claude" => Ok(Subscription::Claude),
+            "chatgpt" => Ok(Subscription::ChatGpt),
+            "opencode-go" => Ok(Subscription::OpencodeGo),
+            "other" => Ok(Subscription::Other),
+            other => Err(format!("unknown subscription: {other}")),
+        }
+    }
+}
+
+/// Group a collected record by the subscription it draws on.
+///
+/// Several tools share one plan: the Codex CLI and Pi's `openai-codex` provider
+/// both draw on the ChatGPT plan, and Pi's `opencode-go` provider and OpenCode
+/// both draw on the opencode-go plan. This is a pure function so the grouping
+/// stays identical wherever it is applied.
+pub fn subscription_for(source: DataSource, provider: Provider) -> Subscription {
+    match source {
+        DataSource::Log | DataSource::ClaudeQuota => Subscription::Claude,
+        DataSource::CodexRollout => Subscription::ChatGpt,
+        DataSource::PiSession => match provider {
+            Provider::OpenAiCodex => Subscription::ChatGpt,
+            Provider::OpencodeGo => Subscription::OpencodeGo,
+            Provider::Anthropic | Provider::Other => Subscription::Other,
+        },
+        DataSource::OpencodeDb => Subscription::OpencodeGo,
+    }
+}
+
+/// Where a record's cost came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CostSource {
+    /// The provider reported the cost (Pi `cost.total`, OpenCode message `cost`).
+    Reported,
+    /// The cost was computed from configured prices and token counts.
+    Computed,
+    /// No price is configured for the model, so the cost is unknown.
+    Unknown,
+}
+
+impl CostSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CostSource::Reported => "reported",
+            CostSource::Computed => "computed",
+            CostSource::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for CostSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for CostSource {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "reported" => Ok(CostSource::Reported),
+            "computed" => Ok(CostSource::Computed),
+            "unknown" => Ok(CostSource::Unknown),
+            other => Err(format!("unknown cost source: {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,8 +265,12 @@ pub struct UsageRecord {
     pub uuid: Uuid,
     /// When this usage event occurred.
     pub timestamp: DateTime<Utc>,
-    /// Which model was used.
-    pub model: ModelType,
+    /// Model id as the source reports it, e.g. `claude-sonnet-5-5`.
+    pub model: String,
+    /// The provider that billed these tokens.
+    pub provider: Provider,
+    /// The subscription this usage counts against.
+    pub subscription: Subscription,
     /// Number of input tokens (non-cached).
     pub input_tokens: u64,
     /// Number of output tokens.
@@ -138,14 +279,58 @@ pub struct UsageRecord {
     pub cache_read_tokens: u64,
     /// Number of cache write tokens.
     pub cache_write_tokens: u64,
-    /// Computed cost in USD.
-    pub cost_usd: f64,
+    /// Cost in USD. `None` when the model has no configured price.
+    pub cost_usd: Option<f64>,
+    /// Where the cost came from.
+    pub cost_source: CostSource,
+    /// Stable de-duplication key within the provider.
+    pub dedup_key: String,
     /// Session this request belongs to, if known.
     pub session_id: Option<String>,
     /// Project/directory context, if known.
     pub project: Option<String>,
-    /// Data source: "api" or "log".
+    /// Where the record was collected from.
     pub source: DataSource,
+}
+
+/// One observation of a provider-reported quota window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaSnapshot {
+    /// Auto-incremented database ID. None before insertion.
+    pub id: Option<i64>,
+    /// The subscription this window belongs to.
+    pub subscription: Subscription,
+    /// Window name as the source reports it, e.g. `five_hour` or `primary`.
+    pub window: String,
+    /// Used percentage (0-100). None when the provider exposes no percentage.
+    pub used_pct: Option<f64>,
+    /// When the window resets, if known.
+    pub resets_at: Option<DateTime<Utc>>,
+    /// Where the snapshot was collected from.
+    pub source: DataSource,
+    /// When the snapshot was observed.
+    pub observed_at: DateTime<Utc>,
+    /// Plan name as the provider reports it, e.g. `plus`.
+    pub plan_type: Option<String>,
+}
+
+/// One provider quota-limit event (a 429 or an "usage limit reached" message).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaHit {
+    /// Auto-incremented database ID. None before insertion.
+    pub id: Option<i64>,
+    /// The subscription whose limit was hit.
+    pub subscription: Subscription,
+    /// Limit window if the source names one (`5h`, `weekly`, `monthly`).
+    pub period: Option<String>,
+    /// When the limit resets, if the source says.
+    pub reset_at: Option<DateTime<Utc>>,
+    /// When the hit was observed.
+    pub observed_at: DateTime<Utc>,
+    /// The source error kind that produced the hit, e.g. `go_usage_limit`.
+    pub raw_kind: String,
+    /// Stable de-duplication key for the hit.
+    pub dedup_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,7 +375,8 @@ impl Default for BudgetConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyAggregate {
     pub date: NaiveDate,
-    pub model: ModelType,
+    /// Model id as the source reports it, e.g. `claude-sonnet-5-5`.
+    pub model: String,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cache_read_tokens: u64,
@@ -220,47 +406,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_compute_cost_opus() {
-        let cost = ModelType::Opus.compute_cost(1_000_000, 500_000, 200_000, 100_000);
-        // input: 1M * 15/1M = 15.0
-        // output: 500K * 75/1M = 37.5
-        // cache_read: 200K * 1.5/1M = 0.3
-        // cache_write: 100K * 18.75/1M = 1.875
-        let expected = 15.0 + 37.5 + 0.3 + 1.875;
-        assert!((cost - expected).abs() < 1e-10, "got {cost}, expected {expected}");
-    }
-
-    #[test]
-    fn test_compute_cost_sonnet() {
-        let cost = ModelType::Sonnet.compute_cost(1_000_000, 1_000_000, 0, 0);
-        // input: 1M * 3/1M = 3.0
-        // output: 1M * 15/1M = 15.0
-        let expected = 18.0;
-        assert!((cost - expected).abs() < 1e-10, "got {cost}, expected {expected}");
-    }
-
-    #[test]
-    fn test_compute_cost_haiku() {
-        let cost = ModelType::Haiku.compute_cost(500_000, 250_000, 100_000, 50_000);
-        // input: 500K * 0.8/1M = 0.4
-        // output: 250K * 4.0/1M = 1.0
-        // cache_read: 100K * 0.08/1M = 0.008
-        // cache_write: 50K * 1.0/1M = 0.05
-        let expected = 0.4 + 1.0 + 0.008 + 0.05;
-        assert!((cost - expected).abs() < 1e-10, "got {cost}, expected {expected}");
-    }
-
-    #[test]
-    fn test_compute_cost_zero() {
-        let cost = ModelType::Sonnet.compute_cost(0, 0, 0, 0);
-        assert!((cost - 0.0).abs() < 1e-10);
-    }
-
-    #[test]
     fn test_from_str_full_model_ids() {
-        assert_eq!("claude-opus-4-6".parse::<ModelType>().unwrap(), ModelType::Opus);
-        assert_eq!("claude-sonnet-4-6".parse::<ModelType>().unwrap(), ModelType::Sonnet);
-        assert_eq!("claude-haiku-4-5-20251001".parse::<ModelType>().unwrap(), ModelType::Haiku);
+        assert_eq!(
+            "claude-opus-4-6".parse::<ModelType>().unwrap(),
+            ModelType::Opus
+        );
+        assert_eq!(
+            "claude-sonnet-4-6".parse::<ModelType>().unwrap(),
+            ModelType::Sonnet
+        );
+        assert_eq!(
+            "claude-haiku-4-5-20251001".parse::<ModelType>().unwrap(),
+            ModelType::Haiku
+        );
     }
 
     #[test]
@@ -315,5 +473,104 @@ mod tests {
         assert_eq!(json, r#""log""#);
         let parsed: DataSource = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, source);
+    }
+
+    #[test]
+    fn subscription_grouping_claude_logs() {
+        assert_eq!(
+            subscription_for(DataSource::Log, Provider::Anthropic),
+            Subscription::Claude
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_claude_quota() {
+        assert_eq!(
+            subscription_for(DataSource::ClaudeQuota, Provider::Anthropic),
+            Subscription::Claude
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_codex_rollout() {
+        assert_eq!(
+            subscription_for(DataSource::CodexRollout, Provider::OpenAiCodex),
+            Subscription::ChatGpt
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_pi_openai_codex() {
+        assert_eq!(
+            subscription_for(DataSource::PiSession, Provider::OpenAiCodex),
+            Subscription::ChatGpt
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_pi_opencode_go() {
+        assert_eq!(
+            subscription_for(DataSource::PiSession, Provider::OpencodeGo),
+            Subscription::OpencodeGo
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_opencode_db() {
+        assert_eq!(
+            subscription_for(DataSource::OpencodeDb, Provider::Other),
+            Subscription::OpencodeGo
+        );
+    }
+
+    #[test]
+    fn subscription_grouping_other_provider() {
+        assert_eq!(
+            subscription_for(DataSource::PiSession, Provider::Other),
+            Subscription::Other
+        );
+        assert_eq!(
+            subscription_for(DataSource::PiSession, Provider::Anthropic),
+            Subscription::Other
+        );
+    }
+
+    #[test]
+    fn test_subscription_serde_names() {
+        let json = serde_json::to_string(&Subscription::ChatGpt).unwrap();
+        assert_eq!(json, r#""chatgpt""#);
+        let json = serde_json::to_string(&Subscription::OpencodeGo).unwrap();
+        assert_eq!(json, r#""opencode-go""#);
+        assert_eq!(Provider::OpenAiCodex.to_string(), "openai-codex");
+    }
+
+    #[test]
+    fn test_provider_serde_matches_as_str() {
+        for provider in [
+            Provider::Anthropic,
+            Provider::OpenAiCodex,
+            Provider::OpencodeGo,
+            Provider::Other,
+        ] {
+            let json = serde_json::to_string(&provider).unwrap();
+            assert_eq!(json, format!("\"{}\"", provider.as_str()));
+            let parsed: Provider = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, provider);
+        }
+    }
+
+    #[test]
+    fn test_cost_source_serde_roundtrip() {
+        for (source, name) in [
+            (CostSource::Reported, "reported"),
+            (CostSource::Computed, "computed"),
+            (CostSource::Unknown, "unknown"),
+        ] {
+            let json = serde_json::to_string(&source).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            let parsed: CostSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, source);
+            assert_eq!(source.to_string(), name);
+        }
     }
 }

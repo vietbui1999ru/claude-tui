@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"pi-sess-b","timestamp":"2026-03-06T08:00:00.000Z","cwd":"/tmp/my project"}
+{"type":"message","id":"m-cx-1","parentId":null,"timestamp":"2026-03-06T08:00:10.000Z","message":{"role":"assistant","provider":"openai-codex","model":"gpt-5.5-codex","usage":{"input":2000,"output":500,"cacheRead":1500,"cacheWrite":0,"cost":{"total":0.0345}},"stopReason":"stop","timestamp":1772784010000}}
+{"type":"message","id":"m-anth-1","parentId":"m-cx-1","timestamp":"2026-03-06T08:01:00.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-5-5","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}},"stopReason":"stop","timestamp":1772784060000}}
