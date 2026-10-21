@@ -60,15 +60,42 @@ This tool is designed to with an attempt to run safely on your personal machine:
 - **Deterministic deduplication** — UUID v5 generation from log data prevents duplicate records across restarts
 - **Responsive layout** — adapts between full sidebar and compact mode based on terminal width
 
-## Quick Start
+## Install and run
 
 ```bash
-# Start the daemon (reads local Claude Code logs, stores in SQLite)
-cargo run --bin claude-daemon
+# Install both binaries to ~/.cargo/bin
+cargo install --path crates/claude-daemon --locked
+cargo install --path crates/claude-tui --locked
 
-# Launch the TUI (connects to daemon, or runs in mock mode)
-cargo run --bin claude-tui
+# Keep the daemon running (launchd agent: starts at login, restarts on crash)
+scripts/launchd/install.sh            # logs: ~/Library/Logs/claude-daemon.log
+scripts/launchd/install.sh --uninstall
+
+claude-tui                 # dashboard (Overview tab); --demo shows mock data
+claude-tui status --line   # one line for sketchybar
+claude-tui status --json   # versioned JSON, see docs/status-json.md
 ```
+
+After `cargo install` of a new build, run `scripts/launchd/install.sh` again to restart the agent.
+
+The daemon only reads the tools' own files (Claude Code logs, Codex rollouts, Pi sessions, OpenCode's database). Its state is `~/.local/share/claude-daemon/usage.db`. A v1 database migrates to v2 in place on first start, so copy it first if you want a backup.
+
+Optional `~/.config/claude-daemon/config.toml`:
+
+```toml
+# Where the Claude statusline writes its stdin JSON. Absolute path; `~` is not
+# expanded. Default: ~/.local/state/claude-tui/claude-status.json
+claude_status_path = "/Users/you/.local/state/claude-tui/claude-status.json"
+
+# Replaces the bundled config/default-prices.toml entirely (USD per million tokens)
+[prices."claude-opus-5-5"]
+input = 4.0
+output = 20.0
+cache_read = 0.20
+cache_write = 5.0
+```
+
+For development: `cargo run -p claude-daemon`, then `cargo run -p claude-tui`.
 
 **Keybindings:** `←/→` switch tabs | `↑/↓` scroll | `1/2/3` time range | `r` refresh | `q` quit
 
