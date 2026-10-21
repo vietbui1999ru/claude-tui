@@ -92,11 +92,11 @@ impl DaemonClient {
             path: self.socket_path.clone(),
         })?;
 
-        stream
-            .get_mut()
-            .write_all(&req_bytes)
-            .await
-            .map_err(|e| IpcError::Connection(e.to_string()))?;
+        if let Err(e) = stream.get_mut().write_all(&req_bytes).await {
+            // A dead socket must not be reused: the next refresh tick reconnects.
+            *guard = None;
+            return Err(IpcError::Connection(e.to_string()));
+        }
 
         let mut line = String::new();
         match timeout(self.read_timeout, stream.read_line(&mut line)).await {
@@ -106,8 +106,14 @@ impl DaemonClient {
                 return Err(IpcError::Connection("server closed connection".into()));
             }
             Ok(Ok(_)) => { /* line read successfully, continue below */ }
-            Ok(Err(e)) => return Err(IpcError::Connection(e.to_string())),
+            Ok(Err(e)) => {
+                *guard = None;
+                return Err(IpcError::Connection(e.to_string()));
+            }
             Err(_) => {
+                // A late answer would be read as this request's answer, so drop
+                // the stream instead of keeping it.
+                *guard = None;
                 return Err(IpcError::Timeout {
                     timeout_ms: self.read_timeout.as_millis() as u64,
                 });
@@ -190,5 +196,39 @@ impl DaemonClient {
         let p = serde_json::to_value(params).map_err(|e| IpcError::Serialization(e.to_string()))?;
         let val = self.call("models.compare", p).await?;
         serde_json::from_value(val).map_err(|e| IpcError::Deserialization(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A socket in a temporary directory, so the test never touches the real
+    /// daemon socket or the home directory.
+    fn temp_socket() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("claude-tui-client-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir.join("daemon.sock")
+    }
+
+    #[tokio::test]
+    async fn reconnect_after_connection_loss() {
+        let path = temp_socket();
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind temp socket");
+
+        let client = DaemonClient::disconnected(&path);
+        assert!(!client.is_connected());
+        assert!(client.reconnect().await);
+        assert!(client.is_connected());
+
+        // The server hangs up without answering: the call fails and the client
+        // drops the dead stream so the next refresh tick reconnects.
+        let (stream, _) = listener.accept().await.expect("accept");
+        drop(stream);
+        assert!(client.status().await.is_err());
+        assert!(!client.is_connected());
+
+        let _ = std::fs::remove_file(&path);
     }
 }
