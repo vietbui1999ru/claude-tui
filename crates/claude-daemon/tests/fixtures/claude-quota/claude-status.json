@@ -1,0 +1,1 @@
+{"session_id":"sess-quota-demo","cwd":"/tmp/demo","model":{"id":"claude-opus-5-5","display_name":"Opus"},"context_window":{"used_percentage":42.5,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":34.0,"resets_at":1772706000},"seven_day":{"used_percentage":12.0,"resets_at":1773312000}}}

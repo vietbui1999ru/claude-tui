@@ -284,6 +284,8 @@ pub struct CollectorConfig {
     pub codex_roots: Vec<std::path::PathBuf>,
     pub pi_roots: Vec<std::path::PathBuf>,
     pub opencode_db: std::path::PathBuf,
+    pub claude_status_path: std::path::PathBuf,
+    pub claude_json_path: std::path::PathBuf,
 }
 
 impl Default for CollectorConfig {
@@ -294,7 +296,27 @@ impl Default for CollectorConfig {
             codex_roots: default_codex_roots(),
             pi_roots: default_pi_roots(),
             opencode_db: default_opencode_db(),
+            claude_status_path: default_claude_status_path(),
+            claude_json_path: default_claude_json_path(),
         }
+    }
+}
+
+fn default_claude_status_path() -> std::path::PathBuf {
+    match std::env::var("HOME") {
+        Ok(home) => std::path::PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("claude-tui")
+            .join("claude-status.json"),
+        Err(_) => std::path::PathBuf::new(),
+    }
+}
+
+fn default_claude_json_path() -> std::path::PathBuf {
+    match std::env::var("HOME") {
+        Ok(home) => std::path::PathBuf::from(home).join(".claude.json"),
+        Err(_) => std::path::PathBuf::new(),
     }
 }
 
@@ -368,6 +390,10 @@ pub fn default_collectors(
         )),
         Box::new(opencode::OpencodeDbCollector::new(
             config.opencode_db.clone(),
+        )),
+        Box::new(claude_quota::ClaudeQuotaCollector::new(
+            config.claude_status_path.clone(),
+            config.claude_json_path.clone(),
         )),
     ]
 }
