@@ -1,5 +1,11 @@
 # Phase F: hardening, review status, CI (AC-12, AC-16, AC-13)
 
+## Progress from the first run (stopped by a provider 429)
+
+- AC-12 is done and committed (`fix(daemon): owner-only socket and bounded IPC reads (AC-12)`), with 4 `ipc_hardening` tests. Do not redo it.
+- AC-13 has started: some clippy fixes in `storage.rs`, `app.rs` and `mock.rs` are committed. Run `cargo clippy --workspace --all-targets -- -D warnings` to see what remains.
+- Start at step 2 (AC-16), then step 3 (AC-13) and step 4.
+
 ## Do
 
 1. **AC-12, `ipc_hardening`, in `crates/claude-daemon/src/ipc.rs`:**
