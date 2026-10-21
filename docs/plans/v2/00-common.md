@@ -23,7 +23,7 @@ You are implementing one phase of an approved spec in a Rust workspace. You are 
 ## Each AC
 
 1. Write the failing test first, then the code.
-2. Run `cargo test --workspace`, `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings`. Fix until all three are clean.
+2. Run `cargo test --workspace` and `cargo fmt --all` until both are clean. Run `cargo clippy --workspace --all-targets` and add no new warnings in code you write; the existing warnings are AC-13's job (Phase F), so leave them unless your phase is F.
 3. Commit only the files you changed, staged by path (never `git add -A`). Use a conventional commit naming the AC, e.g. `feat(daemon): codex rollout collector (AC-1)`. End the message with `Co-Authored-By: Pi <noreply@pi.dev>`.
 4. Do not push.
 
