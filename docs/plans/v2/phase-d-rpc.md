@@ -17,4 +17,6 @@ Extend `StatusResponse`. Add fields; keep the existing ones so old clients still
 
 "Today" is the local calendar day. Add storage queries for these aggregates and do not load full rows into memory.
 
+Carried over from Phase C: wire the `claude_status_path` key from `config.toml` (loaded by `claude-common/src/config.rs`) into the Claude quota collector's constructor in `default_collectors`. The default stays `~/.local/state/claude-tui/claude-status.json`. Add a test whose name contains `claude_quota` for the configured path.
+
 Tests (names contain `status_rpc_subscriptions`) run against `:memory:` storage seeded with records from all three subscriptions, a quota snapshot, a stale source and a quota hit. They assert the grouping, the sums, the stale flags and the last hit.
