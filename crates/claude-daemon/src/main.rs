@@ -32,8 +32,15 @@ async fn main() {
 
     info!(db = %db_path.display(), socket = %socket_path.display(), "paths resolved");
 
-    // Initialize storage -- fail explicitly if path is not valid UTF-8
-    let db_str = db_path.to_str().expect("Database path must be valid UTF-8");
+    // Initialize storage -- fail explicitly if path is not valid UTF-8, rather
+    // than silently opening a throwaway in-memory database (C3).
+    let db_str = match db_path.to_str() {
+        Some(path) => path,
+        None => {
+            error!("database path is not valid UTF-8: {}", db_path.display());
+            std::process::exit(1);
+        }
+    };
     let storage = match Storage::new(db_str) {
         Ok(s) => Arc::new(Mutex::new(s)),
         Err(e) => {

@@ -1702,6 +1702,55 @@ mod tests {
         assert_eq!(result.total_count, 3);
     }
 
+    /// [C1] A row whose uuid cannot be parsed fails the query; it is never
+    /// replaced with a fresh uuid, so corruption cannot masquerade as data.
+    #[test]
+    fn code_review_c1_corrupt_row_fails_the_query() {
+        let storage = test_storage();
+        storage
+            .insert_usage(&make_record(ModelType::Sonnet, 100, 50))
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE usage_records SET uuid = 'not-a-uuid' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+
+        let error = storage
+            .query_usage(&all_usage())
+            .expect_err("a corrupt uuid fails the query");
+        assert!(error.to_string().contains("bad uuid"), "got {error}");
+    }
+
+    /// [C1 residue] Label columns written by a newer or older release degrade to
+    /// an explicit unknown variant, not to a plausible-looking default such as
+    /// `Sonnet`. Only the label columns are lenient: every numeric and timestamp
+    /// column is read with `?`.
+    #[test]
+    fn code_review_c1_unknown_labels_read_as_unknown() {
+        let storage = test_storage();
+        storage
+            .insert_usage(&make_record(ModelType::Sonnet, 100, 50))
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE usage_records SET provider = 'weird', subscription = 'weird', \
+                 cost_source = 'weird', source = 'weird' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+
+        let result = storage.query_usage(&all_usage()).unwrap();
+        let record = &result.records[0];
+        assert_eq!(record.provider, Provider::Other);
+        assert_eq!(record.subscription, Subscription::Other);
+        assert_eq!(record.cost_source, CostSource::Unknown);
+        assert_eq!(record.source, DataSource::Log);
+    }
+
     #[test]
     fn test_query_with_model_filter() {
         let storage = test_storage();
