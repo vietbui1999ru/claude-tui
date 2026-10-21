@@ -68,15 +68,15 @@ cargo install --path crates/claude-daemon --locked
 cargo install --path crates/claude-tui --locked
 
 # Keep the daemon running (launchd agent: starts at login, restarts on crash)
-scripts/launchd/install.sh            # logs: ~/Library/Logs/claude-daemon.log
-scripts/launchd/install.sh --uninstall
+zsh scripts/launchd/install.sh            # logs: ~/Library/Logs/claude-daemon.log
+zsh scripts/launchd/install.sh --uninstall
 
 claude-tui                 # dashboard (Overview tab); --demo shows mock data
 claude-tui status --line   # one line for sketchybar
 claude-tui status --json   # versioned JSON, see docs/status-json.md
 ```
 
-After `cargo install` of a new build, run `scripts/launchd/install.sh` again to restart the agent.
+After `cargo install` of a new build, run `zsh scripts/launchd/install.sh` again to restart the agent.
 
 The daemon only reads the tools' own files (Claude Code logs, Codex rollouts, Pi sessions, OpenCode's database). Its state is `~/.local/share/claude-daemon/usage.db`. A v1 database migrates to v2 in place on first start, so copy it first if you want a backup.
 

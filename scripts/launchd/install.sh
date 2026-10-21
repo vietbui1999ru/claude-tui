@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Install (or remove) a per-user launchd agent that keeps claude-daemon running.
-# Usage: scripts/launchd/install.sh [--uninstall]
+# Usage: zsh scripts/launchd/install.sh [--uninstall]
 # Expects claude-daemon at ~/.cargo/bin (cargo install --path crates/claude-daemon --locked).
 set -eu
 
