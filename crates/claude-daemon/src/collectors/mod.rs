@@ -282,6 +282,7 @@ pub struct CollectorConfig {
     pub poll_interval_secs: u64,
     pub claude_roots: Vec<std::path::PathBuf>,
     pub codex_roots: Vec<std::path::PathBuf>,
+    pub pi_roots: Vec<std::path::PathBuf>,
 }
 
 impl Default for CollectorConfig {
@@ -290,7 +291,20 @@ impl Default for CollectorConfig {
             poll_interval_secs: 60,
             claude_roots: default_claude_roots(),
             codex_roots: default_codex_roots(),
+            pi_roots: default_pi_roots(),
         }
+    }
+}
+
+fn default_pi_roots() -> Vec<std::path::PathBuf> {
+    match std::env::var("HOME") {
+        Ok(home) => vec![
+            std::path::PathBuf::from(home)
+                .join(".pi")
+                .join("agent")
+                .join("sessions"),
+        ],
+        Err(_) => Vec::new(),
     }
 }
 
@@ -333,8 +347,9 @@ pub fn default_collectors(
         )),
         Box::new(codex::CodexRolloutCollector::new(
             config.codex_roots.clone(),
-            prices,
+            prices.clone(),
         )),
+        Box::new(pi::PiSessionCollector::new(config.pi_roots.clone(), prices)),
     ]
 }
 

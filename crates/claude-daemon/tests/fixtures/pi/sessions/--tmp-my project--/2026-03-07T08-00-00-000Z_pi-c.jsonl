@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"pi-sess-c","timestamp":"2026-03-07T08:00:00.000Z","cwd":"/tmp/my project"}
+{"type":"message","id":"m-monthly","parentId":null,"timestamp":"2026-03-07T08:00:10.000Z","message":{"role":"assistant","provider":"opencode-go","model":"kimi-k2.6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"cost":{"total":0}},"stopReason":"error","errorMessage":"429 monthly usage limit reached. Resets in 3 days 4 hours.","timestamp":1772784010000}}
