@@ -35,10 +35,10 @@ impl Storage {
     /// Open or create a SQLite database at the given path.
     /// For in-memory databases, pass ":memory:".
     pub fn new(db_path: &str) -> Result<Self, StorageError> {
-        if db_path != ":memory:" {
-            if let Some(parent) = Path::new(db_path).parent() {
-                std::fs::create_dir_all(parent).map_err(|e| StorageError::Sqlite(e.to_string()))?;
-            }
+        if db_path != ":memory:"
+            && let Some(parent) = Path::new(db_path).parent()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| StorageError::Sqlite(e.to_string()))?;
         }
 
         let conn = Connection::open(db_path).map_err(|e| StorageError::Sqlite(e.to_string()))?;
@@ -269,6 +269,8 @@ impl Storage {
 
     // --- Usage Records ---
 
+    /// Single-row insert. Used by the storage tests; collectors write batches.
+    #[allow(dead_code)]
     pub fn insert_usage(&self, record: &UsageRecord) -> Result<(), StorageError> {
         insert_usage_row(&self.conn, record).map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
@@ -433,6 +435,12 @@ impl Storage {
         })
     }
 
+    /// Rows of the `daily_aggregates` rollup table.
+    ///
+    /// Nothing populates that table yet: the midnight scheduler is deferred
+    /// (D3, m5, m8), and the `status` and summary paths read `usage_records`
+    /// directly.
+    #[allow(dead_code)]
     pub fn get_daily_aggregates(
         &self,
         start: NaiveDate,
@@ -481,6 +489,9 @@ impl Storage {
         Ok(results)
     }
 
+    /// Recompute one day of `daily_aggregates`; see [`Self::get_daily_aggregates`]
+    /// for why it has no caller yet.
+    #[allow(dead_code)]
     pub fn recompute_daily_aggregate(&self, date: NaiveDate) -> Result<(), StorageError> {
         let date_str = date.to_string();
         let date_next = date.succ_opt().unwrap_or(date).to_string();
@@ -667,6 +678,9 @@ impl Storage {
 
     // --- Sessions ---
 
+    /// Upsert one session row. Used by the storage tests; the daemon rebuilds
+    /// sessions from usage records instead.
+    #[allow(dead_code)]
     pub fn upsert_session(&self, session: &ActiveSession) -> Result<(), StorageError> {
         let model_str = session.model.to_string().to_lowercase();
         let status_str = session.status.to_string().to_lowercase();
@@ -833,26 +847,26 @@ impl Storage {
     }
 
     pub fn set_budget(&self, config: &BudgetConfig) -> Result<(), StorageError> {
-        if let Some(limit) = config.daily_limit_usd {
-            if limit < 0.0 {
-                return Err(StorageError::Query(
-                    "daily_limit_usd must be >= 0".to_string(),
-                ));
-            }
+        if let Some(limit) = config.daily_limit_usd
+            && limit < 0.0
+        {
+            return Err(StorageError::Query(
+                "daily_limit_usd must be >= 0".to_string(),
+            ));
         }
-        if let Some(limit) = config.weekly_limit_usd {
-            if limit < 0.0 {
-                return Err(StorageError::Query(
-                    "weekly_limit_usd must be >= 0".to_string(),
-                ));
-            }
+        if let Some(limit) = config.weekly_limit_usd
+            && limit < 0.0
+        {
+            return Err(StorageError::Query(
+                "weekly_limit_usd must be >= 0".to_string(),
+            ));
         }
-        if let Some(limit) = config.monthly_limit_usd {
-            if limit < 0.0 {
-                return Err(StorageError::Query(
-                    "monthly_limit_usd must be >= 0".to_string(),
-                ));
-            }
+        if let Some(limit) = config.monthly_limit_usd
+            && limit < 0.0
+        {
+            return Err(StorageError::Query(
+                "monthly_limit_usd must be >= 0".to_string(),
+            ));
         }
         if !(0.0..=1.0).contains(&config.alert_threshold_pct) {
             return Err(StorageError::Query(

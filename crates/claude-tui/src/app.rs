@@ -134,12 +134,11 @@ impl App {
             terminal.draw(|frame| self.render(frame))?;
 
             let timeout = tick_rate;
-            if event::poll(timeout)? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        self.handle_key(key.code).await;
-                    }
-                }
+            if event::poll(timeout)?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                self.handle_key(key.code).await;
             }
 
             // Spinner tick (every 100ms)
@@ -183,28 +182,24 @@ impl App {
             KeyCode::Char('3') if self.current_tab == Tab::Tokens => {
                 self.time_range = token_chart::TimeRangeSelection::NinetyDays;
             }
-            KeyCode::Up => match self.current_tab {
-                Tab::Costs => {
-                    self.project_scroll = self.project_scroll.saturating_sub(1);
-                }
-                Tab::Live => {
-                    self.session_selected = self.session_selected.saturating_sub(1);
-                }
-                _ => {}
-            },
-            KeyCode::Down => match self.current_tab {
-                Tab::Costs => {
-                    if self.project_scroll + 1 < self.project_costs.len() {
-                        self.project_scroll += 1;
-                    }
-                }
-                Tab::Live => {
-                    if self.session_selected + 1 < self.sessions.len() {
-                        self.session_selected += 1;
-                    }
-                }
-                _ => {}
-            },
+            KeyCode::Up if self.current_tab == Tab::Costs => {
+                self.project_scroll = self.project_scroll.saturating_sub(1);
+            }
+            KeyCode::Up if self.current_tab == Tab::Live => {
+                self.session_selected = self.session_selected.saturating_sub(1);
+            }
+            KeyCode::Down
+                if self.current_tab == Tab::Costs
+                    && self.project_scroll + 1 < self.project_costs.len() =>
+            {
+                self.project_scroll += 1;
+            }
+            KeyCode::Down
+                if self.current_tab == Tab::Live
+                    && self.session_selected + 1 < self.sessions.len() =>
+            {
+                self.session_selected += 1;
+            }
             _ => {}
         }
     }

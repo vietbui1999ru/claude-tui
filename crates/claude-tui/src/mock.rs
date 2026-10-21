@@ -185,8 +185,8 @@ pub fn mock_daily_aggregates() -> Vec<DailyAggregate> {
             total_cache_read_tokens: cache_r,
             total_cache_write_tokens: cache_w,
             total_cost_usd: cost,
-            request_count: (input / 5000) as u64,
-            session_count: (input / 20000) as u64,
+            request_count: input / 5000,
+            session_count: input / 20000,
         });
     }
 
