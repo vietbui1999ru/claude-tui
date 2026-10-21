@@ -5,7 +5,8 @@
 //! binary prints [`USAGE`] and exits with code 2.
 
 /// Printed for an unknown invocation.
-pub const USAGE: &str = "usage: claude-tui [--demo]\n       claude-tui status --line";
+pub const USAGE: &str =
+    "usage: claude-tui [--demo]\n       claude-tui status --line\n       claude-tui status --json";
 
 /// What the binary was asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +15,8 @@ pub enum Command {
     Tui { demo: bool },
     /// One line for sketchybar (AC-10).
     StatusLine,
+    /// The versioned JSON document the Pi extensions read (AC-18).
+    StatusJson,
 }
 
 /// Parse the arguments after the program name.
@@ -24,6 +27,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         [] => Ok(Command::Tui { demo: false }),
         [only] if only == "--demo" => Ok(Command::Tui { demo: true }),
         [sub, flag] if sub == "status" && flag == "--line" => Ok(Command::StatusLine),
+        [sub, flag] if sub == "status" && flag == "--json" => Ok(Command::StatusJson),
         _ => Err(USAGE.to_string()),
     }
 }
@@ -60,10 +64,14 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_the_status_line_form() {
+    fn cli_parses_the_status_forms() {
         assert_eq!(
             parse_args(&args(&["status", "--line"])),
             Ok(Command::StatusLine)
+        );
+        assert_eq!(
+            parse_args(&args(&["status", "--json"])),
+            Ok(Command::StatusJson)
         );
     }
 
@@ -73,7 +81,6 @@ mod tests {
             vec!["--help"],
             vec!["status"],
             vec!["status", "--yaml"],
-            vec!["status", "--json"],
             vec!["--demo", "status", "--line"],
             vec!["demo"],
         ] {

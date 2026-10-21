@@ -4,6 +4,7 @@ mod client;
 pub mod format;
 mod mock;
 mod overview;
+mod status_json;
 mod status_line;
 mod theme;
 mod widgets;
@@ -39,6 +40,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::StatusLine => {
             let socket = claude_common::socket_path();
             println!("{}", status_line::line(&socket, chrono::Utc::now()).await);
+            Ok(())
+        }
+        Command::StatusJson => {
+            let socket = claude_common::socket_path();
+            println!(
+                "{}",
+                status_json::document(&socket, chrono::Utc::now()).await
+            );
             Ok(())
         }
         Command::Tui { demo } => run_tui(demo).await,
