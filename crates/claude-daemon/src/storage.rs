@@ -619,6 +619,32 @@ impl Storage {
             .map_err(|e| StorageError::Query(e.to_string()))
     }
 
+    /// Every stored `dedup_key`, for collector tests.
+    #[cfg(test)]
+    pub fn dedup_keys_for_test(&self) -> Vec<String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT dedup_key FROM usage_records ORDER BY dedup_key")
+            .expect("prepare dedup_keys");
+        stmt.query_map([], |row| row.get(0))
+            .expect("query dedup_keys")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read dedup_keys")
+    }
+
+    /// Every stored cursor of one collector, as (key, value) pairs.
+    pub fn cursors_for(&self, collector_id: &str) -> Result<Vec<(String, String)>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT \"key\", value FROM collector_cursors WHERE collector_id = ?1")
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![collector_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::Query(e.to_string()))
+    }
+
     #[allow(dead_code)]
     pub fn set_cursor(
         &self,

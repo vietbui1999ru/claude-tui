@@ -1,4 +1,4 @@
-mod collector;
+mod collectors;
 mod ipc;
 mod storage;
 
@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use collector::{Collector, CollectorConfig};
+use collectors::{CollectorConfig, default_collectors, run_loop};
 use ipc::IpcServer;
 use storage::Storage;
 
@@ -48,20 +48,17 @@ async fn main() {
     // Cancellation token for graceful shutdown
     let cancel = CancellationToken::new();
 
+    // Spawn collectors
     let collector_config = CollectorConfig::default();
-
-    // Spawn collector
-    let collector = Collector::new(
+    let prices = load_prices();
+    let collectors = default_collectors(&collector_config, prices);
+    let collector_handle = tokio::spawn(run_loop(
         collector_config,
+        collectors,
         Arc::clone(&storage),
         Arc::clone(&collector_status),
         cancel.clone(),
-    );
-    let collector_handle = tokio::spawn(async move {
-        if let Err(e) = collector.run().await {
-            error!("collector exited with error: {e}");
-        }
-    });
+    ));
 
     // Start IPC server
     let ipc_server = IpcServer::new(
@@ -96,7 +93,7 @@ async fn main() {
         error!("IPC server exited with error: {e}");
     }
 
-    // Wait for collector to finish
+    // Wait for collectors to finish
     let _ = collector_handle.await;
 
     // Clean up socket file
@@ -106,4 +103,16 @@ async fn main() {
 
     // Storage is dropped here, ensuring SQLite WAL is properly checkpointed
     info!("claude-daemon shut down cleanly");
+}
+
+/// Load the user's price config, falling back to the built-in default prices
+/// when the file cannot be read or parsed.
+fn load_prices() -> claude_common::PriceBook {
+    match claude_common::PriceBook::load() {
+        Ok(prices) => prices,
+        Err(e) => {
+            tracing::warn!("failed to load price config ({e}); using built-in default prices");
+            claude_common::PriceBook::embedded().unwrap_or_default()
+        }
+    }
 }
