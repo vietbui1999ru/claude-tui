@@ -1,0 +1,4 @@
+{"timestamp":"2026-03-06T08:00:00.000Z","type":"turn_context","payload":{"model":"gpt-5.5-codex"}}
+{"timestamp":"2026-03-06T08:00:05.000Z","type":"token_usage_record","payload":{"response_id":"resp_ccc","usage":{"input_tokens":700,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":90,"reasoning_output_tokens":0}}}
+{"timestamp":"2026-03-06T08:00:09.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":55.0,"window_minutes":300,"resets_at":1772790000},"secondary":null,"plan_type":"plus"}}}
+{"timestamp":"2026-03-06T08:00:12.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":null}}

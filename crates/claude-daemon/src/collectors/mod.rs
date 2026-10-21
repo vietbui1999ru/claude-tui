@@ -281,6 +281,7 @@ pub fn run_once(
 pub struct CollectorConfig {
     pub poll_interval_secs: u64,
     pub claude_roots: Vec<std::path::PathBuf>,
+    pub codex_roots: Vec<std::path::PathBuf>,
 }
 
 impl Default for CollectorConfig {
@@ -288,7 +289,19 @@ impl Default for CollectorConfig {
         Self {
             poll_interval_secs: 60,
             claude_roots: default_claude_roots(),
+            codex_roots: default_codex_roots(),
         }
+    }
+}
+
+fn default_codex_roots() -> Vec<std::path::PathBuf> {
+    match std::env::var("HOME") {
+        Ok(home) => vec![
+            std::path::PathBuf::from(home)
+                .join(".codex")
+                .join("sessions"),
+        ],
+        Err(_) => Vec::new(),
     }
 }
 
@@ -313,10 +326,16 @@ pub fn default_collectors(
     config: &CollectorConfig,
     prices: claude_common::PriceBook,
 ) -> Vec<Box<dyn SourceCollector + Send>> {
-    vec![Box::new(claude::ClaudeLogCollector::new(
-        config.claude_roots.clone(),
-        prices,
-    ))]
+    vec![
+        Box::new(claude::ClaudeLogCollector::new(
+            config.claude_roots.clone(),
+            prices.clone(),
+        )),
+        Box::new(codex::CodexRolloutCollector::new(
+            config.codex_roots.clone(),
+            prices,
+        )),
+    ]
 }
 
 /// Poll every collector on an interval until cancelled. One collector's error
