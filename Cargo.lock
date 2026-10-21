@@ -140,6 +140,7 @@ dependencies = [
  "chrono",
  "claude-common",
  "directories",
+ "libc",
  "notify",
  "notify-debouncer-mini",
  "rusqlite",

@@ -1,3 +1,4 @@
+use claude_common::protocol::MAX_MESSAGE_LEN;
 use claude_common::{
     ActiveSession, BudgetConfig, BudgetSetResponse, IpcError, ModelsCompareParams,
     ModelsCompareResponse, RpcRequest, RpcResponse, SessionsGetParams, SessionsListParams,
@@ -6,7 +7,7 @@ use claude_common::{
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
@@ -65,9 +66,7 @@ impl DaemonClient {
     }
 
     pub fn is_connected(&self) -> bool {
-        self.stream
-            .try_lock()
-            .map_or(false, |guard| guard.is_some())
+        self.stream.try_lock().is_ok_and(|guard| guard.is_some())
     }
 
     async fn call(
@@ -98,14 +97,20 @@ impl DaemonClient {
             return Err(IpcError::Connection(e.to_string()));
         }
 
-        let mut line = String::new();
-        match timeout(self.read_timeout, stream.read_line(&mut line)).await {
+        // A response is read through a limited reader, so a runaway daemon
+        // cannot buffer more than the cap here either (AC-12).
+        let mut buf = Vec::new();
+        let outcome = {
+            let mut limited = stream.take(MAX_MESSAGE_LEN as u64 + 1);
+            timeout(self.read_timeout, limited.read_until(b'\n', &mut buf)).await
+        };
+        let read = match outcome {
             Ok(Ok(0)) => {
                 // Connection closed
                 *guard = None;
                 return Err(IpcError::Connection("server closed connection".into()));
             }
-            Ok(Ok(_)) => { /* line read successfully, continue below */ }
+            Ok(Ok(read)) => read,
             Ok(Err(e)) => {
                 *guard = None;
                 return Err(IpcError::Connection(e.to_string()));
@@ -118,7 +123,20 @@ impl DaemonClient {
                     timeout_ms: self.read_timeout.as_millis() as u64,
                 });
             }
+        };
+
+        if buf.last() != Some(&b'\n') && read > MAX_MESSAGE_LEN {
+            // The other end kept writing past the cap: drop it.
+            *guard = None;
+            return Err(IpcError::Protocol(format!(
+                "response line exceeds {MAX_MESSAGE_LEN} bytes"
+            )));
         }
+
+        let line = String::from_utf8(buf).map_err(|_| {
+            *guard = None;
+            IpcError::Deserialization("response is not valid UTF-8".to_string())
+        })?;
 
         let resp: RpcResponse =
             serde_json::from_str(&line).map_err(|e| IpcError::Deserialization(e.to_string()))?;
@@ -205,15 +223,42 @@ mod tests {
 
     /// A socket in a temporary directory, so the test never touches the real
     /// daemon socket or the home directory.
-    fn temp_socket() -> std::path::PathBuf {
+    fn temp_socket(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("claude-tui-client-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        dir.join("daemon.sock")
+        dir.join(format!("{name}.sock"))
+    }
+
+    #[tokio::test]
+    async fn ipc_hardening_rejects_an_oversized_response() {
+        let path = temp_socket("oversized-response");
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind temp socket");
+
+        let client = DaemonClient::connect_with_timeout(&path, Duration::from_secs(5))
+            .await
+            .expect("connect");
+        let (mut server, _) = listener.accept().await.expect("accept");
+
+        // 100 KiB and no newline: over the cap, so the client rejects it rather
+        // than buffering the whole line.
+        tokio::spawn(async move {
+            let _ = server.write_all(&vec![b'x'; 100 * 1024]).await;
+        });
+
+        let error = client
+            .status()
+            .await
+            .expect_err("an oversized response is rejected");
+        assert!(matches!(error, IpcError::Protocol(_)), "got {error:?}");
+        assert!(!client.is_connected(), "the stream is dropped");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
     async fn reconnect_after_connection_loss() {
-        let path = temp_socket();
+        let path = temp_socket("daemon");
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).expect("bind temp socket");
 

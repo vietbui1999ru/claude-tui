@@ -63,6 +63,13 @@ pub const COLLECTOR_UNAVAILABLE: i32 = -1;
 pub const STORAGE_ERROR: i32 = -2;
 pub const NOT_FOUND: i32 = -3;
 
+/// Longest request or response line either end of the socket will accept,
+/// excluding the terminating newline.
+///
+/// Both sides apply the same cap through a limited read, so an over-long line
+/// is rejected without being buffered (AC-12, finding V4 and W8).
+pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
+
 // --- Status ---
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
