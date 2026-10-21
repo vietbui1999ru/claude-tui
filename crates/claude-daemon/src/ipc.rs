@@ -569,9 +569,21 @@ mod tests {
             error.message
         );
 
-        // The connection is closed instead of the rest being buffered.
+        // The connection is closed instead of the rest being buffered. The
+        // daemon closes with unread bytes still queued, which macOS reports as
+        // EOF and Linux as ECONNRESET; both mean closed. The timeout fails the
+        // test if the connection were left open.
         let mut rest = String::new();
-        assert_eq!(reader.read_line(&mut rest).await.expect("read eof"), 0);
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reader.read_line(&mut rest),
+        )
+        .await
+        .expect("connection closed within 5s");
+        match closed {
+            Ok(n) => assert_eq!(n, 0, "nothing after the error response"),
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset),
+        }
 
         let _ = writer.await;
         handle.await.expect("handler task").expect("handler result");
