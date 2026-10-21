@@ -275,7 +275,7 @@ mod tests {
         let output = quota.collect(&Cursor::new()).unwrap();
 
         assert_eq!(output.snapshots.len(), 1, "only five_hour is set");
-        assert_eq!(output.snapshots[0].window, "five_hour:live");
+        assert_eq!(output.snapshots[0].window, "five_hour");
         assert_eq!(output.snapshots[0].used_pct, Some(34.0));
         std::fs::remove_dir_all(&dir).ok();
     }

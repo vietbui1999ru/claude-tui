@@ -100,7 +100,7 @@ mod tests {
         SubscriptionStatus {
             subscription,
             quota: vec![QuotaWindow {
-                window: "five_hour:live".to_string(),
+                window: "five_hour".to_string(),
                 used_pct: Some(34.0),
                 resets_at: Some(now() + chrono::Duration::hours(2)),
                 source: DataSource::ClaudeQuota,
@@ -153,7 +153,7 @@ mod tests {
 
         let claude = &subscriptions["claude"];
         assert_eq!(claude["subscription"], json!("claude"));
-        assert_eq!(claude["quota"][0]["window"], json!("five_hour:live"));
+        assert_eq!(claude["quota"][0]["window"], json!("five_hour"));
         assert_eq!(claude["quota"][0]["used_pct"], json!(34.0));
         assert_eq!(claude["today"]["cost_source"], json!("computed"));
         assert_eq!(claude["last_7d"]["cost_usd"], json!(12.4));

@@ -116,7 +116,7 @@ provider exposes no percentage (opencode-go) or nothing was collected.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `window` | string | As the provider reports it. Claude uses `five_hour`/`seven_day` with a collector suffix (`five_hour:live`, `seven_day:stale`, `five_hour:expired`). Codex uses `primary` (5-hour) and `secondary` (weekly). |
+| `window` | string | As the provider reports it. Claude uses `five_hour`/`seven_day`; freshness and expiry are the `stale` and `expired` fields, never part of the name. Codex uses `primary` (5-hour) and `secondary` (weekly). |
 | `used_pct` | number or null | Percent used, 0–100. `null` when the provider exposes no percentage, or when an expired window was cleared instead of reported. |
 | `resets_at` | string or null | RFC 3339 reset time. |
 | `source` | string | `log`, `claude-quota`, `codex-rollout`, `pi-session` or `opencode-db`. |

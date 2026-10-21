@@ -1,15 +1,15 @@
 //! Provider window names, shared by the status line and the Overview cards.
 //!
-//! Claude reports `five_hour`/`seven_day` (the collectors tag them with a
-//! freshness suffix, e.g. `five_hour:stale`). Codex reports the same two windows
-//! as `primary` (5-hour) and `secondary` (weekly).
+//! Claude reports `five_hour`/`seven_day`. Codex reports the same two windows
+//! as `primary` (5-hour) and `secondary` (weekly). Freshness and expiry are the
+//! window's `stale` and `expired` flags, never part of its name.
 
 use claude_common::QuotaWindow;
 
 /// The newest window per label, in `5h` then `7d` order.
 ///
-/// The collectors write a window name per freshness suffix, so several rows can
-/// map to one label. The most recent observation wins. Windows this dashboard
+/// Several rows can map to one label (e.g. a live Claude snapshot and the
+/// `~/.claude.json` fallback). The most recent observation wins. Windows this dashboard
 /// has no label for are dropped.
 pub(crate) fn labelled_windows(quota: &[QuotaWindow]) -> Vec<(&'static str, &QuotaWindow)> {
     let mut best: Vec<(&'static str, &QuotaWindow)> = Vec::new();

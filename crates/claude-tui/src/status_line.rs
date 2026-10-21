@@ -219,8 +219,8 @@ mod tests {
             subscription(
                 Subscription::Claude,
                 vec![
-                    window("five_hour:live", 34.4, false),
-                    window("seven_day:live", 12.0, false),
+                    window("five_hour", 34.4, false),
+                    window("seven_day", 12.0, false),
                 ],
                 totals(Some(9.10), CostSource::Computed),
             ),
@@ -252,7 +252,7 @@ mod tests {
     fn status_line_marks_stale_windows() {
         let claude = subscription(
             Subscription::Claude,
-            vec![window("five_hour:stale", 34.0, true)],
+            vec![window("five_hour", 34.0, true)],
             totals(Some(3.20), CostSource::Reported),
         );
 
@@ -323,11 +323,11 @@ mod tests {
 
     #[test]
     fn status_line_prefers_the_newest_window_per_label() {
-        let mut older = window("five_hour:stale", 90.0, true);
+        let mut older = window("five_hour", 90.0, true);
         older.observed_at = now() - chrono::Duration::days(2);
         let claude = subscription(
             Subscription::Claude,
-            vec![older, window("five_hour:live", 34.0, false)],
+            vec![older, window("five_hour", 34.0, false)],
             totals(Some(1.0), CostSource::Reported),
         );
 

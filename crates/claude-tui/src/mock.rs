@@ -31,7 +31,7 @@ pub fn mock_subscriptions() -> Vec<SubscriptionStatus> {
         subscription: Subscription::Claude,
         quota: vec![
             QuotaWindow {
-                window: "five_hour:live".to_string(),
+                window: "five_hour".to_string(),
                 used_pct: Some(34.0),
                 resets_at: Some(now + chrono::Duration::minutes(95)),
                 source: DataSource::ClaudeQuota,
@@ -40,7 +40,7 @@ pub fn mock_subscriptions() -> Vec<SubscriptionStatus> {
                 expired: false,
             },
             QuotaWindow {
-                window: "seven_day:live".to_string(),
+                window: "seven_day".to_string(),
                 used_pct: Some(12.0),
                 resets_at: Some(now + chrono::Duration::days(4)),
                 source: DataSource::ClaudeQuota,

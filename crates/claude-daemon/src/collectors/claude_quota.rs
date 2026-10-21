@@ -126,34 +126,35 @@ fn read_status_snapshot(path: &std::path::Path, now: DateTime<Utc>) -> Option<Ve
 
     let mut out = Vec::new();
     if let Some(w) = limits.five_hour {
-        out.push(window_snapshot("five_hour", &w, modified, now, "live"));
+        out.push(window_snapshot("five_hour", &w, modified, now));
     }
     if let Some(w) = limits.seven_day {
-        out.push(window_snapshot("seven_day", &w, modified, now, "live"));
+        out.push(window_snapshot("seven_day", &w, modified, now));
     }
     Some(out)
 }
 
+/// Window names stay plain (`five_hour`, `seven_day`); freshness and expiry are
+/// derived from `observed_at` and `resets_at` when status is built.
 fn window_snapshot(
     name: &str,
     window: &Window,
     observed_at: DateTime<Utc>,
     now: DateTime<Utc>,
-    freshness: &str,
 ) -> QuotaSnapshot {
     let resets_at = window
         .resets_at
         .and_then(|s| Utc.timestamp_opt(s, 0).single());
     // A reset that has already passed means the window has expired, not that
     // the percentage is current.
-    let (used_pct, label) = match resets_at {
-        Some(reset) if reset <= now => (None, format!("{name}:expired")),
-        _ => (window.used_percentage, format!("{name}:{freshness}")),
+    let used_pct = match resets_at {
+        Some(reset) if reset <= now => None,
+        _ => window.used_percentage,
     };
     QuotaSnapshot {
         id: None,
         subscription: Subscription::Claude,
-        window: label,
+        window: name.to_string(),
         used_pct,
         resets_at,
         source: DataSource::ClaudeQuota,
@@ -162,7 +163,7 @@ fn window_snapshot(
     }
 }
 
-/// The `~/.claude.json` fallback. Always labelled stale.
+/// The `~/.claude.json` fallback, observed at its `fetchedAtMs`.
 fn read_cached_utilization(
     path: &std::path::Path,
     now: DateTime<Utc>,
@@ -183,14 +184,15 @@ fn read_cached_utilization(
             .as_deref()
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&Utc));
-        let (used_pct, label) = match resets_at {
-            Some(reset) if reset <= now => (None, format!("{name}:expired")),
-            _ => (window.utilization, format!("{name}:stale")),
+        let used_pct = match resets_at {
+            Some(reset) if reset <= now => None,
+            _ => window.utilization,
         };
+        // observed_at is fetchedAtMs, so the 24h stale rule applies to it.
         out.push(QuotaSnapshot {
             id: None,
             subscription: Subscription::Claude,
-            window: label,
+            window: name.to_string(),
             used_pct,
             resets_at,
             source: DataSource::ClaudeQuota,
@@ -256,7 +258,7 @@ mod tests {
             .find(|s| s.window.starts_with("five_hour"))
             .unwrap();
         assert_eq!(five.used_pct, Some(34.0));
-        assert_eq!(five.window, "five_hour:live");
+        assert_eq!(five.window, "five_hour");
         assert_eq!(five.source, DataSource::ClaudeQuota);
         assert!(snaps.iter().any(|s| s.window.starts_with("seven_day")));
     }
@@ -284,7 +286,7 @@ mod tests {
             .iter()
             .find(|s| s.window.starts_with("five_hour"))
             .unwrap();
-        assert_eq!(five.window, "five_hour:stale");
+        assert_eq!(five.window, "five_hour");
         assert_eq!(five.used_pct, Some(61.0));
         assert_eq!(five.source, DataSource::ClaudeQuota);
     }
@@ -307,7 +309,9 @@ mod tests {
 
         let snaps = quota_snapshots(&status, &claude_json, now);
         assert!(
-            snaps.iter().all(|s| !s.window.ends_with(":live")),
+            snaps
+                .iter()
+                .all(|s| s.observed_at > now - chrono::Duration::hours(1)),
             "a 48h-old snapshot must not be shown as live"
         );
         assert_eq!(snaps[0].used_pct, Some(7.0));
@@ -322,7 +326,7 @@ mod tests {
         write(&status, body);
         let snaps = quota_snapshots(&status, &dir.join("none.json"), Utc::now());
         assert_eq!(snaps.len(), 1);
-        assert_eq!(snaps[0].window, "five_hour:expired");
+        assert_eq!(snaps[0].window, "five_hour");
         assert_eq!(
             snaps[0].used_pct, None,
             "an expired window shows no percentage"
