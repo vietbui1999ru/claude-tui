@@ -508,7 +508,12 @@ impl Storage {
     }
 
     // --- Quota snapshots and hits ---
+    //
+    // Added by the v2 migration (AC-8). The collectors (Phase C) and the
+    // status RPC (Phase D) are the callers, so the binary does not reference
+    // this API yet; the storage tests do.
 
+    #[allow(dead_code)]
     pub fn insert_quota_snapshot(&self, snapshot: &QuotaSnapshot) -> Result<(), StorageError> {
         self.conn
             .execute(
@@ -529,6 +534,7 @@ impl Storage {
     }
 
     /// The newest snapshot per window for one subscription.
+    #[allow(dead_code)]
     pub fn latest_quota(
         &self,
         subscription: Subscription,
@@ -558,6 +564,7 @@ impl Storage {
     }
 
     /// Insert a quota hit. A repeated `dedup_key` is ignored.
+    #[allow(dead_code)]
     pub fn insert_quota_hit(&self, hit: &QuotaHit) -> Result<(), StorageError> {
         self.conn
             .execute(
@@ -577,6 +584,7 @@ impl Storage {
     }
 
     /// The most recent quota hit for one subscription.
+    #[allow(dead_code)]
     pub fn latest_quota_hit(
         &self,
         subscription: Subscription,
@@ -595,6 +603,7 @@ impl Storage {
 
     // --- Collector cursors ---
 
+    #[allow(dead_code)]
     pub fn get_cursor(
         &self,
         collector_id: &str,
@@ -610,6 +619,7 @@ impl Storage {
             .map_err(|e| StorageError::Query(e.to_string()))
     }
 
+    #[allow(dead_code)]
     pub fn set_cursor(
         &self,
         collector_id: &str,
@@ -1000,6 +1010,7 @@ fn row_to_usage_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord>
     })
 }
 
+#[allow(dead_code)]
 fn row_to_quota_snapshot(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuotaSnapshot> {
     let subscription_str: String = row.get(1)?;
     let source_str: String = row.get(5)?;
@@ -1021,6 +1032,7 @@ fn row_to_quota_snapshot(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuotaSnaps
     })
 }
 
+#[allow(dead_code)]
 fn row_to_quota_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuotaHit> {
     let subscription_str: String = row.get(1)?;
     let observed_at_str: String = row.get(4)?;
@@ -1058,6 +1070,7 @@ fn parse_rfc3339(text: &str, column: usize) -> rusqlite::Result<DateTime<Utc>> {
 
 /// Parse an enum stored as its `as_str` form. Quota rows are always written by
 /// this crate, so an unknown value is a corrupt row, not a legacy one.
+#[allow(dead_code)]
 fn parse_column<T>(text: &str, column: usize) -> rusqlite::Result<T>
 where
     T: std::str::FromStr<Err = String>,
