@@ -814,7 +814,8 @@ impl Storage {
                      SUM(output_tokens) as total_output_tokens,
                      SUM(cache_read_tokens) as total_cache_read_tokens,
                      SUM(cache_write_tokens) as total_cache_write_tokens,
-                     SUM(cost_usd) as cost_usd,
+                     -- SUM is NULL when every cost is unknown; sessions.cost_usd is NOT NULL.
+                     COALESCE(SUM(cost_usd), 0.0) as cost_usd,
                      COUNT(*) as request_count,
                      CASE WHEN MAX(timestamp) >= ?1 THEN 'streaming' ELSE 'idle' END as status,
                      project
@@ -1636,6 +1637,29 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM budget_config", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1); // seeded row
+    }
+
+    #[test]
+    fn unknown_model_kept_rebuild_sessions_with_only_unknown_costs() {
+        // A session whose every record has an unknown cost sums to NULL in
+        // SQLite; rebuilding sessions must not fail on that.
+        let mut storage = test_storage();
+        let mut record = make_record(ModelType::Sonnet, 100, 50);
+        record.model = "some-unpriced-model".to_string();
+        record.cost_usd = None;
+        record.cost_source = CostSource::Unknown;
+        storage.insert_usage_batch(&[record]).unwrap();
+
+        storage.rebuild_sessions().unwrap();
+
+        let (count, cost): (i64, f64) = storage
+            .conn
+            .query_row("SELECT COUNT(*), SUM(cost_usd) FROM sessions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(cost, 0.0);
     }
 
     #[test]
