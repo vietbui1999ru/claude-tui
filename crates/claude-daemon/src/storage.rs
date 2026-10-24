@@ -52,6 +52,20 @@ impl Storage {
         Ok(storage)
     }
 
+    /// Open a read-only connection to a database that [`Self::new`] already
+    /// created and migrated. Under WAL it reads while the writer connection
+    /// collects, so a `status` request never waits on a collector pass.
+    pub fn open_reader(db_path: &str) -> Result<Self, StorageError> {
+        let flags =
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(db_path, flags)
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        // A WAL checkpoint can briefly lock readers; wait rather than fail.
+        conn.busy_timeout(std::time::Duration::from_millis(500))
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(Self { conn })
+    }
+
     /// Run database migrations to bring the schema up to date.
     pub fn migrate(&mut self) -> Result<(), StorageError> {
         self.conn
