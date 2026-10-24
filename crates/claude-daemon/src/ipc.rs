@@ -109,6 +109,8 @@ fn bind_private(path: &Path) -> Result<UnixListener, claude_common::IpcError> {
 pub struct IpcServer {
     socket_path: PathBuf,
     storage: Arc<Mutex<Storage>>,
+    /// Connection the `status` RPC reads through; see [`Self::with_status_reader`].
+    status_reader: Arc<Mutex<Storage>>,
     start_time: std::time::Instant,
     collector_status: Arc<Mutex<CollectorStatus>>,
     cancel: CancellationToken,
@@ -123,11 +125,19 @@ impl IpcServer {
     ) -> Self {
         Self {
             socket_path,
+            status_reader: Arc::clone(&storage),
             storage,
             start_time: std::time::Instant::now(),
             collector_status,
             cancel,
         }
+    }
+
+    /// Serve `status` from a separate read-only connection so it never waits
+    /// behind a collector pass holding the writer lock. Defaults to the writer.
+    pub fn with_status_reader(mut self, reader: Arc<Mutex<Storage>>) -> Self {
+        self.status_reader = reader;
+        self
     }
 
     pub async fn run(&self) -> Result<(), claude_common::IpcError> {
@@ -155,12 +165,13 @@ impl IpcServer {
                     match result {
                         Ok((stream, _addr)) => {
                             let storage = Arc::clone(&self.storage);
+                            let status_reader = Arc::clone(&self.status_reader);
                             let start_time = self.start_time;
                             let collector_status = Arc::clone(&self.collector_status);
                             let cancel = self.cancel.clone();
                             tokio::spawn(async move {
                                 if let Err(e) =
-                                    handle_client(stream, storage, start_time, collector_status, cancel).await
+                                    handle_client(stream, storage, status_reader, start_time, collector_status, cancel).await
                                 {
                                     warn!("client handler error: {e}");
                                 }
@@ -181,6 +192,7 @@ impl IpcServer {
 async fn handle_client(
     stream: tokio::net::UnixStream,
     storage: Arc<Mutex<Storage>>,
+    status_reader: Arc<Mutex<Storage>>,
     start_time: std::time::Instant,
     collector_status: Arc<Mutex<CollectorStatus>>,
     cancel: CancellationToken,
@@ -236,7 +248,16 @@ async fn handle_client(
         };
 
         let response = match serde_json::from_str::<RpcRequest>(&line) {
-            Ok(request) => handle_request(&storage, &request, start_time, &collector_status).await,
+            Ok(request) => {
+                handle_request(
+                    &storage,
+                    &status_reader,
+                    &request,
+                    start_time,
+                    &collector_status,
+                )
+                .await
+            }
             Err(e) => RpcResponse::error(
                 0,
                 RpcError {
@@ -255,6 +276,7 @@ async fn handle_client(
 
 async fn handle_request(
     storage: &Arc<Mutex<Storage>>,
+    status_reader: &Arc<Mutex<Storage>>,
     request: &RpcRequest,
     start_time: std::time::Instant,
     collector_status: &Arc<Mutex<CollectorStatus>>,
@@ -269,7 +291,7 @@ async fn handle_request(
             // [U1 fix] Acquire collector_status FIRST to avoid ABBA deadlock with collector.
             let cs = *collector_status.lock().await;
 
-            let storage = storage.lock().await;
+            let storage = status_reader.lock().await;
             let uptime = start_time.elapsed().as_secs();
             let cost_today = storage.get_cost_today().unwrap_or(0.0);
             let budget = storage.get_budget().unwrap_or_default();
@@ -541,6 +563,7 @@ mod tests {
         let (server, client) = tokio::net::UnixStream::pair().expect("socket pair");
         let handle = tokio::spawn(handle_client(
             server,
+            Arc::clone(&storage),
             storage,
             std::time::Instant::now(),
             collector_status,
@@ -731,7 +754,7 @@ mod tests {
         }
 
         let req = make_request("status", serde_json::Value::Null);
-        let resp = handle_request(&storage, &req, start_time, &collector_status).await;
+        let resp = handle_request(&storage, &storage, &req, start_time, &collector_status).await;
         let status: claude_common::protocol::StatusResponse =
             serde_json::from_value(resp.result.expect("status result")).unwrap();
 
@@ -815,9 +838,41 @@ mod tests {
         let start_time = std::time::Instant::now();
         let collector_status = Arc::new(Mutex::new(CollectorStatus::Offline));
         let req = make_request("status", serde_json::Value::Null);
-        let resp = handle_request(&storage, &req, start_time, &collector_status).await;
+        let resp = handle_request(&storage, &storage, &req, start_time, &collector_status).await;
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
+    }
+
+    /// A collector pass holds the writer lock for seconds; `status` must still
+    /// answer through the reader instead of timing out the 2s status client.
+    #[tokio::test]
+    async fn status_answers_while_the_writer_is_locked() {
+        let path = std::env::temp_dir().join(format!(
+            "claude-daemon-reader-{}-{:?}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        let db = path.to_str().unwrap();
+        let storage = Arc::new(Mutex::new(Storage::new(db).unwrap()));
+        let reader = Arc::new(Mutex::new(Storage::open_reader(db).unwrap()));
+        let collector_status = Arc::new(Mutex::new(CollectorStatus::Log));
+        let req = make_request("status", serde_json::Value::Null);
+
+        let _collector_pass = storage.lock().await;
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle_request(
+                &storage,
+                &reader,
+                &req,
+                std::time::Instant::now(),
+                &collector_status,
+            ),
+        )
+        .await
+        .expect("status waited on the writer lock");
+        assert!(resp.error.is_none());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
@@ -826,7 +881,7 @@ mod tests {
         let start_time = std::time::Instant::now();
         let collector_status = Arc::new(Mutex::new(CollectorStatus::Offline));
         let req = make_request("budget.get", serde_json::Value::Null);
-        let resp = handle_request(&storage, &req, start_time, &collector_status).await;
+        let resp = handle_request(&storage, &storage, &req, start_time, &collector_status).await;
         assert!(resp.result.is_some());
     }
 
@@ -836,7 +891,7 @@ mod tests {
         let start_time = std::time::Instant::now();
         let collector_status = Arc::new(Mutex::new(CollectorStatus::Offline));
         let req = make_request("nonexistent", serde_json::Value::Null);
-        let resp = handle_request(&storage, &req, start_time, &collector_status).await;
+        let resp = handle_request(&storage, &storage, &req, start_time, &collector_status).await;
         assert!(resp.error.is_some());
         assert_eq!(
             resp.error.unwrap().code,
@@ -850,7 +905,7 @@ mod tests {
         let start_time = std::time::Instant::now();
         let collector_status = Arc::new(Mutex::new(CollectorStatus::Offline));
         let req = make_request("usage.query", serde_json::json!({}));
-        let resp = handle_request(&storage, &req, start_time, &collector_status).await;
+        let resp = handle_request(&storage, &storage, &req, start_time, &collector_status).await;
         assert!(resp.result.is_some());
 
         let result: claude_common::protocol::UsageQueryResponse =
@@ -873,12 +928,14 @@ mod tests {
                 "alert_threshold_pct": 0.75
             }),
         );
-        let set_resp = handle_request(&storage, &set_req, start_time, &collector_status).await;
+        let set_resp =
+            handle_request(&storage, &storage, &set_req, start_time, &collector_status).await;
         assert!(set_resp.result.is_some());
 
         // Get budget
         let get_req = make_request("budget.get", serde_json::Value::Null);
-        let get_resp = handle_request(&storage, &get_req, start_time, &collector_status).await;
+        let get_resp =
+            handle_request(&storage, &storage, &get_req, start_time, &collector_status).await;
         let config: claude_common::BudgetConfig =
             serde_json::from_value(get_resp.result.unwrap()).unwrap();
         assert_eq!(config.daily_limit_usd, Some(10.0));
@@ -893,7 +950,7 @@ mod tests {
             "sessions.get",
             serde_json::json!({"session_id": "nonexistent"}),
         );
-        let resp = handle_request(&storage, &req, start_time, &collector_status).await;
+        let resp = handle_request(&storage, &storage, &req, start_time, &collector_status).await;
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, NOT_FOUND);
     }

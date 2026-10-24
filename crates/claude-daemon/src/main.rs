@@ -68,12 +68,21 @@ async fn main() {
     ));
 
     // Start IPC server
+    // Opened after `Storage::new` has created and migrated the database.
+    let status_reader = match Storage::open_reader(db_str) {
+        Ok(s) => Arc::new(Mutex::new(s)),
+        Err(e) => {
+            error!("failed to open status reader: {e}");
+            std::process::exit(1);
+        }
+    };
     let ipc_server = IpcServer::new(
         socket_path.clone(),
         Arc::clone(&storage),
         collector_status,
         cancel.clone(),
-    );
+    )
+    .with_status_reader(status_reader);
 
     // Handle SIGINT/SIGTERM for graceful shutdown
     let cancel_signal = cancel.clone();
