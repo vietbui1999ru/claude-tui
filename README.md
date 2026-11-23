@@ -1,3 +1,24 @@
+# Status: maintenance only
+
+Do not add new features. The agent-harness project replaces this dashboard. Its supervisor and the hc session state report usage and session status (specs P1-03 and P1-05 in `vietbui1999ru/agent-harness`).
+
+The Mac still uses claude-tui through these dotfiles parts:
+
+- the sketchybar `claude_usage` item, which runs `claude-tui status --json`;
+- the aerospace `alt-u` binding for the usage popup;
+- the herdr-app `ai-spend` mod;
+- the Claude status line, which writes a snapshot to `~/.local/state/claude-tui`.
+
+Each part works when claude-tui is absent. The sketchybar item then shows "usage: daemon down".
+
+## Removal order
+
+1. Keep the daemon running on the Mac until the harness reports usage there.
+2. Remove the dotfiles parts above in one dotfiles change.
+3. Run `zsh scripts/launchd/install.sh --uninstall` to remove the launchd agent.
+4. Run `cargo uninstall claude-daemon claude-tui`.
+5. Archive this repository.
+
 # **WARNING** This project may contain security vulnerabilities, or at least memory and code-quality issues. Built in a weekend to test out personal Claude Vibe-Code Workflow and for local development and playtest only. Use at your own risk.
 # claude-tui
 
